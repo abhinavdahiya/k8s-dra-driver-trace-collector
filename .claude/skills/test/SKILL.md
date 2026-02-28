@@ -47,10 +47,35 @@ or a namespace other than `trace-dra-test`.
 
 ### Deploy
 
+Before deploying, detect the Docker socket so `ko` and `kind`
+can reach the daemon:
+
+1. Run `docker context ls` and find the row marked `*` (active).
+2. Extract the `DOCKER ENDPOINT` value (e.g.
+   `unix:///Users/you/.rd/docker.sock`).
+3. If it is **not** `unix:///var/run/docker.sock`, prefix every
+   `ko resolve` and `kind load` command with
+   `DOCKER_HOST=<endpoint>`.
+
+Then run the 3-step deploy (`ko apply` does not support
+`--context`):
+
 ```bash
 kubectl --context kind-trace-dra-test create namespace trace-dra-test
-KO_DOCKER_REPO=ko.local ko apply --context kind-trace-dra-test -f deploy/
+
+# 1. Build image and generate resolved YAML
+KO_DOCKER_REPO=ko.local ko resolve -f deploy/ 2>/dev/null > /tmp/ko-resolved.yaml
+
+# 2. Load image into kind's containerd
+IMAGE=$(grep 'image:.*ko.local' /tmp/ko-resolved.yaml | awk '{print $2}')
+kind load docker-image --name trace-dra-test "$IMAGE"
+
+# 3. Apply resolved manifests
+kubectl --context kind-trace-dra-test apply -f /tmp/ko-resolved.yaml
 ```
+
+If the Docker socket is non-default, add `DOCKER_HOST=...` to
+steps 1 and 2.
 
 ### Verify
 
