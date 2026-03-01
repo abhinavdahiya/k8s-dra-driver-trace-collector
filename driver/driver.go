@@ -68,9 +68,8 @@ type PreparedClaim struct {
 // ListenerState records the per-pod listener resources created for
 // a prepared claim. Used for reconciliation and cleanup.
 type ListenerState struct {
-	SocketPath     string `json:"socketPath"`
-	ConfigFile     string `json:"configFile"`
-	SpansPerSecond int    `json:"spansPerSecond"`
+	SocketPath string `json:"socketPath"`
+	ConfigFile string `json:"configFile"`
 }
 
 // PreparedDevice records a single allocation result from the
@@ -204,15 +203,11 @@ func (d *Driver) PrepareResourceClaims(
 			Devices:   devices,
 		}
 
-		// Compute scaled parameters for the listener.
-		params := alloy.ComputeParams(
-			claimUID,
-			pc.TotalShares(),
-			d.cfg,
-		)
+		// Compute the socket path for CDI spec and directory creation.
+		socketPath := alloy.SocketPath(d.cfg.Alloy.SocketDir, claimUID)
 
 		// Write CDI spec synchronously (kubelet needs it immediately).
-		if err := cdi.WriteSpec(d.cdiDir, claimUID, params.SocketPath); err != nil {
+		if err := cdi.WriteSpec(d.cdiDir, claimUID, socketPath); err != nil {
 			results[claim.UID] = kubeletplugin.PrepareResult{
 				Err: fmt.Errorf("writing CDI spec for claim %s: %w", claimUID, err),
 			}
@@ -222,7 +217,7 @@ func (d *Driver) PrepareResourceClaims(
 		// Create the per-claim socket directory so the CDI directory
 		// bind mount succeeds. Alloy will create the actual socket
 		// inside this directory when the listener starts.
-		socketDir := filepath.Dir(params.SocketPath)
+		socketDir := filepath.Dir(socketPath)
 		if err := os.MkdirAll(socketDir, 0755); err != nil {
 			results[claim.UID] = kubeletplugin.PrepareResult{
 				Err: fmt.Errorf("creating socket directory for claim %s: %w", claimUID, err),
@@ -232,9 +227,8 @@ func (d *Driver) PrepareResourceClaims(
 
 		// Record listener state.
 		pc.Listener = &ListenerState{
-			SocketPath:     params.SocketPath,
-			ConfigFile:     alloy.ConfigFileName(claimUID),
-			SpansPerSecond: params.SpansPerSecond,
+			SocketPath: socketPath,
+			ConfigFile: alloy.ConfigFileName(claimUID),
 		}
 
 		// Store in prepared map.
@@ -252,8 +246,7 @@ func (d *Driver) PrepareResourceClaims(
 			"name", claim.Name,
 			"allocationResults", len(devices),
 			"totalShares", pc.TotalShares(),
-			"socketPath", params.SocketPath,
-			"spansPerSecond", params.SpansPerSecond)
+			"socketPath", socketPath)
 
 		results[claim.UID] = buildPrepareResult(pc)
 	}

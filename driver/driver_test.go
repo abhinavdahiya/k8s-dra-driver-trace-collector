@@ -353,7 +353,6 @@ func TestPrepare_ListenerState(t *testing.T) {
 	require.NotNil(t, pc.Listener)
 	assert.Equal(t, filepath.Join(drv.cfg.Alloy.SocketDir, "uid-ls", "claim_uid-ls.sock"), pc.Listener.SocketPath)
 	assert.Equal(t, "claim-uid-ls.alloy", pc.Listener.ConfigFile)
-	assert.Equal(t, 500, pc.Listener.SpansPerSecond) // 5 units * 100
 
 	// Verify the per-claim socket directory was created.
 	info, err := os.Stat(filepath.Join(drv.cfg.Alloy.SocketDir, "uid-ls"))

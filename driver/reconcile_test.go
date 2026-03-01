@@ -83,7 +83,6 @@ func addPreparedClaim(drv *Driver, uid string, shares int64) {
 	drv.mu.Lock()
 	defer drv.mu.Unlock()
 
-	params := alloy.ComputeParams(uid, shares, drv.cfg)
 	drv.prepared[types.UID(uid)] = &PreparedClaim{
 		ClaimUID:  types.UID(uid),
 		Namespace: "default",
@@ -97,9 +96,8 @@ func addPreparedClaim(drv *Driver, uid string, shares int64) {
 			},
 		},
 		Listener: &ListenerState{
-			SocketPath:     params.SocketPath,
-			ConfigFile:     alloy.ConfigFileName(uid),
-			SpansPerSecond: params.SpansPerSecond,
+			SocketPath: alloy.SocketPath(drv.cfg.Alloy.SocketDir, uid),
+			ConfigFile: alloy.ConfigFileName(uid),
 		},
 	}
 }

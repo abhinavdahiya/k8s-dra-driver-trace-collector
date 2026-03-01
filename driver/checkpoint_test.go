@@ -75,9 +75,8 @@ func TestSaveCheckpoint_Basic(t *testing.T) {
 			},
 		},
 		Listener: &ListenerState{
-			SocketPath:     "/var/run/alloy/uid-1/claim_uid-1.sock",
-			ConfigFile:     "claim-uid-1.alloy",
-			SpansPerSecond: 500,
+			SocketPath: "/var/run/alloy/uid-1/claim_uid-1.sock",
+			ConfigFile: "claim-uid-1.alloy",
 		},
 	}
 	err := drv.saveCheckpoint()
@@ -113,9 +112,8 @@ func TestLoadCheckpoint_Basic(t *testing.T) {
 			},
 		},
 		Listener: &ListenerState{
-			SocketPath:     "/var/run/alloy/uid-load/claim_uid-load.sock",
-			ConfigFile:     "claim-uid-load.alloy",
-			SpansPerSecond: 300,
+			SocketPath: "/var/run/alloy/uid-load/claim_uid-load.sock",
+			ConfigFile: "claim-uid-load.alloy",
 		},
 	}
 	err := drv.saveCheckpoint()
@@ -138,7 +136,6 @@ func TestLoadCheckpoint_Basic(t *testing.T) {
 	assert.Len(t, pc.Devices, 1)
 	assert.Equal(t, int64(30), pc.Devices[0].ConsumedCapacity)
 	require.NotNil(t, pc.Listener)
-	assert.Equal(t, 300, pc.Listener.SpansPerSecond)
 }
 
 func TestLoadCheckpoint_MissingFile(t *testing.T) {
@@ -178,9 +175,8 @@ func TestCheckpoint_RoundTrip(t *testing.T) {
 			{Request: "trace-shares", Pool: "node-1", Device: "trace-capacity", ConsumedCapacity: 20},
 		},
 		Listener: &ListenerState{
-			SocketPath:     "/var/run/alloy/rt-1/claim_rt-1.sock",
-			ConfigFile:     "claim-rt-1.alloy",
-			SpansPerSecond: 300,
+			SocketPath: "/var/run/alloy/rt-1/claim_rt-1.sock",
+			ConfigFile: "claim-rt-1.alloy",
 		},
 	}
 	drv.prepared[types.UID("rt-2")] = &PreparedClaim{
@@ -191,9 +187,8 @@ func TestCheckpoint_RoundTrip(t *testing.T) {
 			{Request: "trace-shares", Pool: "node-1", Device: "trace-capacity", ConsumedCapacity: 100},
 		},
 		Listener: &ListenerState{
-			SocketPath:     "/var/run/alloy/rt-2/claim_rt-2.sock",
-			ConfigFile:     "claim-rt-2.alloy",
-			SpansPerSecond: 1000,
+			SocketPath: "/var/run/alloy/rt-2/claim_rt-2.sock",
+			ConfigFile: "claim-rt-2.alloy",
 		},
 	}
 	err := drv.saveCheckpoint()
@@ -220,7 +215,6 @@ func TestCheckpoint_RoundTrip(t *testing.T) {
 	require.NotNil(t, pc2)
 	assert.Equal(t, "ns-b", pc2.Namespace)
 	assert.Equal(t, int64(100), pc2.TotalShares())
-	assert.Equal(t, 1000, pc2.Listener.SpansPerSecond)
 }
 
 func TestCheckpoint_EmptyPrepared(t *testing.T) {

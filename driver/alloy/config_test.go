@@ -44,6 +44,13 @@ func testConfig() *config.TraceDRADriverConfiguration {
 	}
 }
 
+func TestSocketPath(t *testing.T) {
+	assert.Equal(t,
+		"/var/run/alloy/abc-123/claim_abc-123.sock",
+		SocketPath("/var/run/alloy", "abc-123"),
+	)
+}
+
 func TestComputeParams_SingleUnit(t *testing.T) {
 	cfg := testConfig()
 

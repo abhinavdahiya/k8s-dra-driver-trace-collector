@@ -29,6 +29,13 @@ type ConfigParams struct {
 	NumTraces            int    // tail_sampling num_traces (default 50000)
 }
 
+// SocketPath returns the Unix domain socket path for a claim.
+// This is a pure path computation with no side effects — it does not
+// create the directory or socket file.
+func SocketPath(socketDir, claimUID string) string {
+	return filepath.Join(socketDir, claimUID, "claim_"+claimUID+".sock")
+}
+
 // ComputeParams calculates the scaled ConfigParams for a claim
 // directly from the driver configuration.
 func ComputeParams(claimUID string, shares int64, cfg *config.TraceDRADriverConfiguration) ConfigParams {
@@ -52,7 +59,7 @@ func ComputeParams(claimUID string, shares int64, cfg *config.TraceDRADriverConf
 		ClaimUID:             claimUID,
 		Label:                label,
 		Shares:               shares,
-		SocketPath:           filepath.Join(cfg.Alloy.SocketDir, claimUID, "claim_"+claimUID+".sock"),
+		SocketPath:           SocketPath(cfg.Alloy.SocketDir, claimUID),
 		MaxConcurrentStreams: streams,
 		MaxRecvMsgSize:       cfg.Scaling.MaxRecvMsgSize,
 		SpansPerSecond:       sps,
