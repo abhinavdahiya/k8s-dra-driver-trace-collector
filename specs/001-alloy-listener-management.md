@@ -64,7 +64,7 @@ This spec closes that gap. When the DRA driver prepares a claim,
 it creates a **dedicated OTLP ingress listener** in Grafana Alloy
 for that pod, with transport and throughput limits scaled to the
 pod's claimed shares. Each pod gets its own Unix domain socket and
-cannot exceed its allocated byte rate.
+cannot exceed its allocated span rate.
 
 ## Scope
 
@@ -134,12 +134,12 @@ Each pod gets an isolated ingress path. The sidecar writes two
 Alloy components per pod:
 
 ```
-Pod -> UDS -> otelcol.receiver.otlp (gRPC limits) -> otelcol.processor.tail_sampling (bytes_limiting) -> [admin pipeline entry]
+Pod -> UDS -> otelcol.receiver.otlp (gRPC limits) -> otelcol.processor.tail_sampling (rate_limiting) -> [admin pipeline entry]
 ```
 
 The receiver provides transport-level isolation (dedicated socket,
 connection limits). The tail_sampling processor enforces a
-bytes-per-second rate limit scaled to the pod's claimed shares.
+spans-per-second rate limit scaled to the pod's claimed shares.
 Together they guarantee that no single pod can monopolize the
 collector's trace processing capacity.
 
@@ -255,12 +255,11 @@ otelcol.processor.tail_sampling "<label>" {
   num_traces    = <num_traces>
 
   policy {
-    name = "bytes-limit"
-    type = "bytes_limiting"
+    name = "rate-limit"
+    type = "rate_limiting"
 
-    bytes_limiting {
-      bytes_per_second = <scaled_bytes_per_second>
-      burst_capacity   = <scaled_burst>
+    rate_limiting {
+      spans_per_second = <scaled_spans_per_second>
     }
   }
 
@@ -279,8 +278,7 @@ otelcol.processor.tail_sampling "<label>" {
 | `<shares>` | Total shares from `PreparedClaim.TotalShares()` |
 | `<scaled_streams>` | `max(min_streams, units * streams_per_unit)` |
 | `<scaled_msg_size>` | Fixed per deployment (e.g. `"4MiB"`) |
-| `<scaled_bytes_per_second>` | `max(min_bytes_per_second, units * bytes_per_unit)` |
-| `<scaled_burst>` | `2 * scaled_bytes_per_second` (token bucket burst) |
+| `<scaled_spans_per_second>` | `max(min_spans_per_second, units * spans_per_unit)` |
 | `<pipeline_entry_point>` | From `alloy.pipelineEntryPoint` config field |
 | `<decision_wait>` | From `rateLimiting.decisionWait` config field (default `5s`) |
 | `<num_traces>` | From `rateLimiting.numTraces` config field (default `50000`) |
@@ -309,9 +307,8 @@ scaling.
 
 | Parameter | Per-unit value | Floor | Example (1 unit / 10 shares) | Example (10 units / 100 shares) |
 |---|---|---|---|---|
-| `bytes_per_second` | `scaling.bytesPerUnit` (default 10240) | `scaling.minBytesPerSecond` (default 10240) | 10240 B/s | 102400 B/s |
-| `burst_capacity` | 2× `bytes_per_second` | 2× floor | 20480 B | 204800 B |
-| `max_concurrent_streams` | `scaling.streamsPerUnit` (default 10) | 10 | 10 | 100 |
+| `spans_per_second` | `scaling.spansPerUnit` (default 100) | `scaling.minSpansPerSecond` (default 100) | 100 spans/s | 1000 spans/s |
+| `max_concurrent_streams` | `scaling.streamsPerUnit` (default 10) | 1 | 10 | 100 |
 | `max_recv_msg_size` | fixed | -- | `"4MiB"` | `"4MiB"` |
 
 ### Driver Configuration
@@ -347,7 +344,7 @@ type TraceDRADriverConfiguration struct {
     Scaling ScalingSpec `json:"scaling" yaml:"scaling"`
 
     // Per-pod rate limiting settings (implemented via tail_sampling
-    // bytes_limiting policy).
+    // rate_limiting policy).
     RateLimiting RateLimitingSpec `json:"rateLimiting" yaml:"rateLimiting"`
 
     // Reconciler loop settings.
@@ -397,15 +394,15 @@ type AlloySpec struct {
 }
 
 type ScalingSpec struct {
-    // BytesPerUnit is the bytes/sec rate limit per unit
+    // SpansPerUnit is the spans/sec rate limit per unit
     // (1 unit = driver.stepSize shares).
-    // Default: 10240
-    BytesPerUnit int `json:"bytesPerUnit" yaml:"bytesPerUnit"`
+    // Default: 100
+    SpansPerUnit int `json:"spansPerUnit" yaml:"spansPerUnit"`
 
-    // MinBytesPerSecond is the floor for the bytes/sec rate limit.
+    // MinSpansPerSecond is the floor for the spans/sec rate limit.
     // Guarantees minimum throughput even for a 1-unit claim.
-    // Default: 10240
-    MinBytesPerSecond int `json:"minBytesPerSecond" yaml:"minBytesPerSecond"`
+    // Default: 100
+    MinSpansPerSecond int `json:"minSpansPerSecond" yaml:"minSpansPerSecond"`
 
     // StreamsPerUnit is the gRPC max_concurrent_streams per unit.
     // Default: 10
@@ -453,8 +450,8 @@ alloy:
   socketDir: /var/run/alloy
   pipelineEntryPoint: otelcol.processor.memory_limiter.global.input
 scaling:
-  bytesPerUnit: 10240
-  minBytesPerSecond: 10240
+  spansPerUnit: 100
+  minSpansPerSecond: 100
   streamsPerUnit: 10
   maxRecvMsgSize: 4MiB
 rateLimiting:
@@ -500,11 +497,11 @@ func SetDefaults(cfg *TraceDRADriverConfiguration) {
     if cfg.Alloy.SocketDir == "" {
         cfg.Alloy.SocketDir = "/var/run/alloy"
     }
-    if cfg.Scaling.BytesPerUnit == 0 {
-        cfg.Scaling.BytesPerUnit = 10240
+    if cfg.Scaling.SpansPerUnit == 0 {
+        cfg.Scaling.SpansPerUnit = 100
     }
-    if cfg.Scaling.MinBytesPerSecond == 0 {
-        cfg.Scaling.MinBytesPerSecond = 10240
+    if cfg.Scaling.MinSpansPerSecond == 0 {
+        cfg.Scaling.MinSpansPerSecond = 100
     }
     if cfg.Scaling.StreamsPerUnit == 0 {
         cfg.Scaling.StreamsPerUnit = 10
@@ -537,7 +534,7 @@ Returns an aggregate error if:
 - `alloy.pipelineEntryPoint` is empty
 - `driver.totalShares` ≤ 0
 - `driver.stepSize` ≤ 0
-- `scaling.bytesPerUnit` ≤ 0
+- `scaling.spansPerUnit` ≤ 0
 - Any duration field is negative
 
 #### Loading
@@ -556,12 +553,12 @@ func LoadConfigFile(path string) (*TraceDRADriverConfiguration, error)
 
 Given `driver.totalShares: 1000` and default scaling parameters:
 
-| Units (shares) | `bytes_per_second` | `burst_capacity` | `max_concurrent_streams` |
-|---|---|---|---|
-| 1 (10) | 10240 | 20480 | 10 |
-| 5 (50) | 51200 | 102400 | 50 |
-| 10 (100) | 102400 | 204800 | 100 |
-| 50 (500) | 512000 | 1024000 | 500 |
+| Units (shares) | `spans_per_second` | `max_concurrent_streams` |
+|---|---|---|
+| 1 (10) | 100 | 10 |
+| 5 (50) | 500 | 50 |
+| 10 (100) | 1000 | 100 |
+| 50 (500) | 5000 | 500 |
 
 ---
 
@@ -1126,7 +1123,7 @@ listener, reloads Alloy, and cleans up the CDI spec and socket.
       pointing to the per-pod Unix domain socket, stores the claim in
       `d.prepared`, saves the checkpoint, and returns immediately.
 - [ ] The reconciler writes a per-pod `.alloy` config file with a
-      UDS receiver and bytes-limited tail_sampling processor.
+      UDS receiver and rate-limited tail_sampling processor.
 - [ ] The reconciler calls `POST /-/reload` after writing config
       files. A single reload covers all pending changes.
 - [ ] If reload fails (HTTP 400), the reconciler logs the error and
@@ -1138,7 +1135,7 @@ listener, reloads Alloy, and cleans up the CDI spec and socket.
       idempotent (returns cached result).
 - [ ] Calling `UnprepareResourceClaims` for an unknown claim is a
       no-op.
-- [ ] gRPC transport limits and bytes_per_second are correctly
+- [ ] gRPC transport limits and spans_per_second are correctly
       scaled from the claim's shares using the linear-with-floor
       formula.
 - [ ] Prepare does not block on Alloy reload — kubelet gRPC
@@ -1163,37 +1160,19 @@ listener, reloads Alloy, and cleans up the CDI spec and socket.
 ### Types
 
 ```go
-// AlloyConfigParams holds the computed values for rendering a
+// ConfigParams holds the computed values for rendering a
 // per-pod .alloy config file.
-type AlloyConfigParams struct {
-    ClaimUID            string // raw claim UID
-    Label               string // sanitized label (hyphens -> underscores)
-    Shares              int64  // total shares for this claim
-    SocketPath          string // /var/run/alloy/<claimUID>.sock
-    MaxConcurrentStreams int    // scaled gRPC streams
-    MaxRecvMsgSize      string // e.g. "4MiB"
-    BytesPerSecond      int    // scaled bytes/sec rate limit
-    BurstCapacity       int    // 2 * BytesPerSecond
-    PipelineEntryPoint  string // admin's pipeline entry component
-    DecisionWait        string // tail_sampling decision_wait (default "5s")
-    NumTraces           int    // tail_sampling num_traces (default 50000)
-}
-
-// ScalingConfig holds the per-unit scaling parameters extracted
-// from TraceDRADriverConfiguration. One unit = stepSize shares
-// = 1 extended resource.
-//
-// Populated from cfg.Driver, cfg.Scaling, cfg.RateLimiting, and
-// cfg.Alloy at startup. See Driver Configuration for the full
-// API type.
-type ScalingConfig struct {
-    BytesPerUnit       int    // cfg.Scaling.BytesPerUnit
-    MinBytesPerSecond  int    // cfg.Scaling.MinBytesPerSecond
-    StreamsPerUnit     int    // cfg.Scaling.StreamsPerUnit
-    MaxRecvMsgSize     string // cfg.Scaling.MaxRecvMsgSize
-    StepSize           int    // cfg.Driver.StepSize
-    DecisionWait       string // cfg.RateLimiting.DecisionWait
-    NumTraces          int    // cfg.RateLimiting.NumTraces
+type ConfigParams struct {
+    ClaimUID             string // raw claim UID
+    Label                string // sanitized label (hyphens -> underscores)
+    Shares               int64  // total shares for this claim
+    SocketPath           string // /var/run/alloy/<claimUID>/claim_<claimUID>.sock
+    MaxConcurrentStreams  int    // scaled gRPC streams
+    MaxRecvMsgSize       string // e.g. "4MiB"
+    SpansPerSecond       int    // scaled spans/sec rate limit
+    PipelineEntryPoint   string // admin's pipeline entry component
+    DecisionWait         string // tail_sampling decision_wait (default "5s")
+    NumTraces            int    // tail_sampling num_traces (default 50000)
 }
 ```
 
@@ -1203,22 +1182,22 @@ type ScalingConfig struct {
 func ComputeParams(
     claimUID string,
     shares int64,
-    scaling ScalingConfig,
-    socketDir string,
-    pipelineEntryPoint string,
-) AlloyConfigParams
+    cfg *config.TraceDRADriverConfiguration,
+) ConfigParams
 ```
 
-Applies the linear-with-floor formula:
+Applies the linear-with-floor formula directly from the driver
+configuration:
 
 ```go
-units := int(shares) / scaling.StepSize
-bps := units * scaling.BytesPerUnit
-if bps < scaling.MinBytesPerSecond {
-    bps = scaling.MinBytesPerSecond
+units := int(shares) / cfg.Driver.StepSize
+
+sps := units * cfg.Scaling.SpansPerUnit
+if sps < cfg.Scaling.MinSpansPerSecond {
+    sps = cfg.Scaling.MinSpansPerSecond
 }
 
-streams := units * scaling.StreamsPerUnit
+streams := units * cfg.Scaling.StreamsPerUnit
 if streams < 1 {
     streams = 1
 }
@@ -1227,7 +1206,7 @@ if streams < 1 {
 ### RenderConfig
 
 ```go
-func RenderConfig(params AlloyConfigParams) ([]byte, error)
+func RenderConfig(params ConfigParams) ([]byte, error)
 ```
 
 Uses `text/template` to render the `.alloy` file content from
@@ -1251,7 +1230,7 @@ Returns nil if the file does not exist (idempotent).
 
 | Test | Validates |
 |---|---|
-| `TestComputeParams_LinearScaling` | 50 shares (5 units) -> expected bytes/sec, streams |
+| `TestComputeParams_LinearScaling` | 50 shares (5 units) -> expected spans/sec, streams |
 | `TestComputeParams_Floor` | 10 shares (1 unit) -> floor values applied |
 | `TestComputeParams_LabelSanitization` | Hyphens replaced with underscores |
 | `TestRenderConfig` | Template produces valid Alloy syntax with all params substituted |
@@ -1376,9 +1355,7 @@ For each claim in the batch:
    params := ComputeParams(
        claimUID,
        pc.TotalShares(),
-       d.scalingConfig,
-       d.socketDir,
-       d.pipelineEntryPoint,
+       d.cfg,
    )
    ```
 
@@ -1393,7 +1370,7 @@ For each claim in the batch:
    pc.Listener = &ListenerState{
        SocketPath:     params.SocketPath,
        ConfigFile:     configFileName(claimUID),
-       BytesPerSecond: params.BytesPerSecond,
+       SpansPerSecond: params.SpansPerSecond,
    }
    ```
 
@@ -1453,7 +1430,7 @@ type PreparedDevice struct {
 type ListenerState struct {
     SocketPath     string `json:"socketPath"`
     ConfigFile     string `json:"configFile"`
-    BytesPerSecond int    `json:"bytesPerSecond"`
+    SpansPerSecond int    `json:"spansPerSecond"`
 }
 ```
 
@@ -2182,7 +2159,7 @@ same Alloy process memory, providing no actual per-pod isolation.
 Considered for per-pod queue buffering. Removed from the per-pod
 pipeline because the admin manages the downstream pipeline. Adding
 a per-pod batch processor is unnecessary complexity when the admin
-already configures a shared batch processor. The bytes_limiting
+already configures a shared batch processor. The rate_limiting
 rate control provides sufficient per-pod throughput isolation at the
 ingress boundary.
 
@@ -2196,20 +2173,18 @@ definitions), not as inline component instances. The HTTP
 `/-/reload` API provides synchronous confirmation, which is
 essential for the driver to know whether its config was accepted.
 
-### `rate_limiting` policy (spans per second)
+### `bytes_limiting` policy (bytes per second)
 
 The `tail_sampling` processor offers both `rate_limiting`
-(spans/sec) and `bytes_limiting` (bytes/sec). `bytes_limiting` was
+(spans/sec) and `bytes_limiting` (bytes/sec). `rate_limiting` was
 chosen because:
 
-- Bytes are a better proxy for resource consumption than span count.
-  A single large span consumes more memory and bandwidth than many
-  small spans.
-- The token bucket algorithm in `bytes_limiting` allows brief bursts
-  while enforcing a long-term average, matching real-world trace
-  traffic patterns.
-- Scaling by bytes aligns naturally with the share model: more shares
-  = more byte budget.
+- Spans per second maps directly to request rates, making it
+  simpler for admins to reason about capacity and set limits.
+- No burst parameter is needed — `rate_limiting` has only
+  `spans_per_second`, reducing configuration complexity.
+- Scaling by span count aligns naturally with the share model:
+  more shares = higher span budget.
 
 ### `otelcol.processor.probabilistic_sampler`
 
@@ -2253,6 +2228,6 @@ config directory.
 | Requirement | Minimum Version | Notes |
 |---|---|---|
 | Kubernetes | 1.35+ | `DRAConsumableCapacity` feature gate |
-| Grafana Alloy | 1.13+ | `otelcol.processor.tail_sampling` with `bytes_limiting` policy |
+| Grafana Alloy | 1.13+ | `otelcol.processor.tail_sampling` with `rate_limiting` policy |
 | Container runtime | containerd 1.7+ or CRI-O 1.28+ | CDI support |
 | kubectl | matching cluster version | |
