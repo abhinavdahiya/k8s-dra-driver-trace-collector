@@ -7,42 +7,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/abhinavdahiya/k8s-dra-driver-trace-collector/internal/atomicfile"
+
+	specs "tags.cncf.io/container-device-interface/specs-go"
 )
 
 const (
-	// CDIVersion is the CDI spec version.
-	CDIVersion = "0.6.0"
-
 	// CDIKind is the CDI device kind.
 	CDIKind = "trace.example.com/trace"
 )
-
-// Spec represents a CDI specification document.
-type Spec struct {
-	CDIVersion string   `json:"cdiVersion"`
-	Kind       string   `json:"kind"`
-	Devices    []Device `json:"devices"`
-}
-
-// Device represents a single CDI device entry.
-type Device struct {
-	Name           string         `json:"name"`
-	ContainerEdits ContainerEdits `json:"containerEdits"`
-}
-
-// ContainerEdits describes the modifications to apply to a container.
-type ContainerEdits struct {
-	Env    []string `json:"env"`
-	Mounts []Mount  `json:"mounts"`
-}
-
-// Mount describes a bind mount.
-type Mount struct {
-	HostPath      string   `json:"hostPath"`
-	ContainerPath string   `json:"containerPath"`
-	Type          string   `json:"type,omitempty"`
-	Options       []string `json:"options,omitempty"`
-}
 
 // DeviceID returns the fully qualified CDI device ID for a claim.
 func DeviceID(claimUID string) string {
@@ -58,19 +32,19 @@ func specFileName(claimUID string) string {
 // The mount exposes the socket's parent directory (e.g.
 // /var/run/alloy/<claimUID>/) so the consumer can access the socket
 // at the same absolute path.
-func NewSpec(claimUID string, socketPath string) *Spec {
+func NewSpec(claimUID string, socketPath string) *specs.Spec {
 	socketDir := filepath.Dir(socketPath)
-	return &Spec{
-		CDIVersion: CDIVersion,
-		Kind:       CDIKind,
-		Devices: []Device{
+	return &specs.Spec{
+		Version: specs.CurrentVersion,
+		Kind:    CDIKind,
+		Devices: []specs.Device{
 			{
 				Name: claimUID,
-				ContainerEdits: ContainerEdits{
+				ContainerEdits: specs.ContainerEdits{
 					Env: []string{
 						fmt.Sprintf("TRACE_ENDPOINT=unix://%s", socketPath),
 					},
-					Mounts: []Mount{
+					Mounts: []*specs.Mount{
 						{
 							HostPath:      socketDir,
 							ContainerPath: socketDir,
@@ -95,27 +69,7 @@ func WriteSpec(cdiDir string, claimUID string, socketPath string) error {
 
 	target := filepath.Join(cdiDir, specFileName(claimUID))
 
-	// Atomic write: temp file + rename.
-	tmp, err := os.CreateTemp(cdiDir, ".trace-*.json.tmp")
-	if err != nil {
-		return fmt.Errorf("creating temp file: %w", err)
-	}
-	tmpName := tmp.Name()
-
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return fmt.Errorf("writing temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return fmt.Errorf("closing temp file: %w", err)
-	}
-	if err := os.Rename(tmpName, target); err != nil {
-		os.Remove(tmpName)
-		return fmt.Errorf("renaming temp file to %s: %w", target, err)
-	}
-	return nil
+	return atomicfile.WriteFile(target, data)
 }
 
 // DeleteSpec removes <cdiDir>/trace-<claimUID>.json.

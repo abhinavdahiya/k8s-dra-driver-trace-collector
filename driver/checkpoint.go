@@ -4,7 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
+
+	"github.com/abhinavdahiya/k8s-dra-driver-trace-collector/internal/atomicfile"
 
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
@@ -42,27 +43,7 @@ func (d *Driver) saveCheckpoint() error {
 		return fmt.Errorf("marshaling checkpoint: %w", err)
 	}
 
-	dir := filepath.Dir(d.checkpointPath)
-	tmp, err := os.CreateTemp(dir, ".checkpoint-*.json.tmp")
-	if err != nil {
-		return fmt.Errorf("creating temp checkpoint file: %w", err)
-	}
-	tmpName := tmp.Name()
-
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return fmt.Errorf("writing temp checkpoint: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return fmt.Errorf("closing temp checkpoint: %w", err)
-	}
-	if err := os.Rename(tmpName, d.checkpointPath); err != nil {
-		os.Remove(tmpName)
-		return fmt.Errorf("renaming checkpoint: %w", err)
-	}
-	return nil
+	return atomicfile.WriteFile(d.checkpointPath, b)
 }
 
 // LoadCheckpoint reads the checkpoint file and populates d.prepared.

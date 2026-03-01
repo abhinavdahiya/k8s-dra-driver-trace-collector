@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"text/template"
+
+	"github.com/abhinavdahiya/k8s-dra-driver-trace-collector/internal/atomicfile"
 )
 
 // ConfigParams holds the computed values for rendering a
@@ -136,27 +138,7 @@ func ConfigFileName(claimUID string) string {
 func WriteConfigFile(configDir string, claimUID string, content []byte) error {
 	target := filepath.Join(configDir, ConfigFileName(claimUID))
 
-	// Atomic write: write to temp file in the same dir, then rename.
-	tmp, err := os.CreateTemp(configDir, ".claim-*.alloy.tmp")
-	if err != nil {
-		return fmt.Errorf("creating temp file: %w", err)
-	}
-	tmpName := tmp.Name()
-
-	if _, err := tmp.Write(content); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return fmt.Errorf("writing temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return fmt.Errorf("closing temp file: %w", err)
-	}
-	if err := os.Rename(tmpName, target); err != nil {
-		os.Remove(tmpName)
-		return fmt.Errorf("renaming temp file to %s: %w", target, err)
-	}
-	return nil
+	return atomicfile.WriteFile(target, content)
 }
 
 // DeleteConfigFile removes <configDir>/claim-<claimUID>.alloy.
@@ -192,11 +174,15 @@ func SyncAdminConfig(srcDir, dstDir string) (changed bool, err error) {
 
 	// Copy new or changed files from src to dst.
 	for _, src := range srcMatches {
+		baseName := filepath.Base(src)
+		// Never overwrite reconciler-managed claim configs.
+		if strings.HasPrefix(baseName, "claim-") {
+			continue
+		}
 		srcData, err := os.ReadFile(src)
 		if err != nil {
 			return changed, fmt.Errorf("reading %s: %w", src, err)
 		}
-		baseName := filepath.Base(src)
 		dstPath := filepath.Join(dstDir, baseName)
 
 		// Compare with existing file; skip if identical.
@@ -205,24 +191,8 @@ func SyncAdminConfig(srcDir, dstDir string) (changed bool, err error) {
 			continue
 		}
 
-		// Atomic write: temp file + rename.
-		tmp, err := os.CreateTemp(dstDir, ".admin-*.alloy.tmp")
-		if err != nil {
-			return changed, fmt.Errorf("creating temp file in %s: %w", dstDir, err)
-		}
-		tmpName := tmp.Name()
-		if _, err := tmp.Write(srcData); err != nil {
-			tmp.Close()
-			os.Remove(tmpName)
-			return changed, fmt.Errorf("writing temp file: %w", err)
-		}
-		if err := tmp.Close(); err != nil {
-			os.Remove(tmpName)
-			return changed, fmt.Errorf("closing temp file: %w", err)
-		}
-		if err := os.Rename(tmpName, dstPath); err != nil {
-			os.Remove(tmpName)
-			return changed, fmt.Errorf("renaming %s to %s: %w", tmpName, dstPath, err)
+		if err := atomicfile.WriteFile(dstPath, srcData); err != nil {
+			return changed, err
 		}
 		changed = true
 	}

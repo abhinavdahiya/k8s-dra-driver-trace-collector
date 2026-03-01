@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	specs "tags.cncf.io/container-device-interface/specs-go"
 )
 
 func TestDeviceID(t *testing.T) {
@@ -17,7 +18,7 @@ func TestDeviceID(t *testing.T) {
 func TestNewSpec(t *testing.T) {
 	spec := NewSpec("abc-123", "/var/run/alloy/abc-123/claim_abc-123.sock")
 
-	assert.Equal(t, CDIVersion, spec.CDIVersion)
+	assert.Equal(t, specs.CurrentVersion, spec.Version)
 	assert.Equal(t, CDIKind, spec.Kind)
 	require.Len(t, spec.Devices, 1)
 
@@ -32,18 +33,15 @@ func TestNewSpec(t *testing.T) {
 	assert.Equal(t, []string{"bind"}, dev.ContainerEdits.Mounts[0].Options)
 }
 
-func TestNewSpec_JSONFormat(t *testing.T) {
+func TestNewSpec_JSONRoundTrip(t *testing.T) {
 	spec := NewSpec("abc-123", "/var/run/alloy/abc-123/claim_abc-123.sock")
 
 	data, err := json.MarshalIndent(spec, "", "  ")
 	require.NoError(t, err)
 
-	// Parse back and verify round-trip
-	var parsed Spec
+	var parsed specs.Spec
 	require.NoError(t, json.Unmarshal(data, &parsed))
-	assert.Equal(t, spec.CDIVersion, parsed.CDIVersion)
-	assert.Equal(t, spec.Kind, parsed.Kind)
-	assert.Equal(t, spec.Devices[0].Name, parsed.Devices[0].Name)
+	assert.Equal(t, *spec, parsed)
 }
 
 func TestWriteSpec(t *testing.T) {
@@ -51,15 +49,12 @@ func TestWriteSpec(t *testing.T) {
 	err := WriteSpec(dir, "abc-123", "/var/run/alloy/abc-123/claim_abc-123.sock")
 	require.NoError(t, err)
 
-	// Read and parse the file
 	data, err := os.ReadFile(filepath.Join(dir, "trace-abc-123.json"))
 	require.NoError(t, err)
 
-	var spec Spec
-	require.NoError(t, json.Unmarshal(data, &spec))
-	assert.Equal(t, CDIVersion, spec.CDIVersion)
-	assert.Equal(t, CDIKind, spec.Kind)
-	assert.Equal(t, "abc-123", spec.Devices[0].Name)
+	want, err := json.MarshalIndent(NewSpec("abc-123", "/var/run/alloy/abc-123/claim_abc-123.sock"), "", "  ")
+	require.NoError(t, err)
+	assert.Equal(t, string(want), string(data))
 }
 
 func TestWriteSpec_Overwrite(t *testing.T) {
@@ -70,9 +65,9 @@ func TestWriteSpec_Overwrite(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(dir, "trace-uid.json"))
 	require.NoError(t, err)
 
-	var spec Spec
-	require.NoError(t, json.Unmarshal(data, &spec))
-	assert.Contains(t, spec.Devices[0].ContainerEdits.Env[0], "/sock2")
+	want, err := json.MarshalIndent(NewSpec("uid", "/sock2"), "", "  ")
+	require.NoError(t, err)
+	assert.Equal(t, string(want), string(data))
 }
 
 func TestDeleteSpec(t *testing.T) {

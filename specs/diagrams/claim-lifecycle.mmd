@@ -1,0 +1,44 @@
+sequenceDiagram
+    participant K as Kubelet
+    participant D as Driver
+    participant CP as Checkpoint
+    participant CDI as CDI Spec
+    participant R as Reconciler
+    participant CF as Config Files
+    participant A as Alloy
+    participant SK as UDS Socket
+
+    Note over K,SK: ── Prepare (synchronous, fast) ──
+
+    K->>D: PrepareResourceClaims(claim)
+    D->>D: Idempotency check (d.prepared)
+    D->>D: Parse allocation → PreparedClaim
+    D->>D: Compute scaling params
+    D->>CDI: Write CDI spec (idempotent)
+    D->>D: d.prepared[uid] = pc
+    D->>CP: Save checkpoint (best-effort)
+    D-->>K: PrepareResult{CDIDeviceIDs}
+
+    Note over K,SK: ── Reconcile (async, idempotent) ──
+
+    D->>R: Trigger reconcile
+    R->>CF: Write claim-uid.alloy (idempotent)
+    R->>A: POST /-/reload
+    A->>SK: Create socket on listen
+
+    Note over K,SK: ── Pod starts, SDK retries until socket exists ──
+
+    Note over K,SK: ── Unprepare (synchronous, fast) ──
+
+    K->>D: UnprepareResourceClaims(claim)
+    D->>D: delete(d.prepared, uid)
+    D->>CP: Save checkpoint (best-effort)
+    D-->>K: nil
+
+    Note over K,SK: ── Reconcile (async, idempotent) ──
+
+    D->>R: Trigger reconcile
+    R->>CF: Delete orphan config (idempotent)
+    R->>A: POST /-/reload
+    R->>CDI: Delete orphan CDI spec
+    R->>SK: Delete orphan socket (if exists)
