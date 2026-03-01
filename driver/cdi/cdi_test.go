@@ -18,7 +18,7 @@ func TestDeviceID(t *testing.T) {
 func TestNewSpec(t *testing.T) {
 	spec := NewSpec("abc-123", "/var/run/alloy/abc-123/claim_abc-123.sock")
 
-	assert.Equal(t, specs.CurrentVersion, spec.Version)
+	assert.Equal(t, CDIVersion, spec.Version)
 	assert.Equal(t, CDIKind, spec.Kind)
 	require.Len(t, spec.Devices, 1)
 

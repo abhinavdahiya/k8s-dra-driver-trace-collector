@@ -16,6 +16,12 @@ import (
 const (
 	// CDIKind is the CDI device kind.
 	CDIKind = "trace.example.com/trace"
+
+	// CDIVersion is the CDI spec version to use.
+	// containerd v2.x ships with a CDI library that does not yet support
+	// spec version 1.x. We pin to 0.6.0 which is widely supported and
+	// covers all features we need (env vars, mounts with options).
+	CDIVersion = "0.6.0"
 )
 
 // DeviceID returns the fully qualified CDI device ID for a claim.
@@ -35,7 +41,7 @@ func specFileName(claimUID string) string {
 func NewSpec(claimUID string, socketPath string) *specs.Spec {
 	socketDir := filepath.Dir(socketPath)
 	return &specs.Spec{
-		Version: specs.CurrentVersion,
+		Version: CDIVersion,
 		Kind:    CDIKind,
 		Devices: []specs.Device{
 			{

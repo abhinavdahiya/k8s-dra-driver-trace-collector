@@ -740,7 +740,7 @@ injects the Unix domain socket path into the pod's containers.
 
 ```json
 {
-  "cdiVersion": "0.8.0",
+  "cdiVersion": "0.6.0",
   "kind": "trace.example.com/trace",
   "devices": [
     {
