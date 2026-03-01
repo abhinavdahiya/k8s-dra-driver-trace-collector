@@ -23,9 +23,10 @@ func (d *Driver) BuildResources() resourceslice.DriverResources {
 			"shares": {
 				Value: resource.MustParse(strconv.Itoa(d.totalShares)),
 				RequestPolicy: &resourceapi.CapacityRequestPolicy{
-					Default: ptr.To(resource.MustParse("1")),
+					Default: ptr.To(resource.MustParse("10")),
 					ValidRange: &resourceapi.CapacityRequestPolicyRange{
-						Min: ptr.To(resource.MustParse("1")),
+						Min:  ptr.To(resource.MustParse("10")),
+						Step: ptr.To(resource.MustParse("10")),
 					},
 				},
 			},
