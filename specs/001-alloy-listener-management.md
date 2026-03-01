@@ -801,8 +801,6 @@ recording the claim, without waiting for Alloy to reload.
 The driver maintains 6 state stores with different durability
 characteristics:
 
-![State Stores](images/state-stores.png) ([source](diagrams/state-stores.mmd))
-
 ```mermaid
 graph TB
     subgraph kubelet["Kubelet (source of truth)"]
@@ -860,8 +858,6 @@ checkpoint.
 Prepare and Unprepare are thin synchronous operations. The
 reconciler does the actual Alloy and filesystem work
 asynchronously.
-
-![Claim Lifecycle](images/claim-lifecycle.png) ([source](diagrams/claim-lifecycle.mmd))
 
 ```mermaid
 sequenceDiagram
@@ -971,8 +967,6 @@ filesystem and Alloy state toward the desired state expressed by
 Every step is idempotent. On any failure, the reconciler logs the
 error and returns — the next trigger or timer tick retries from the
 top.
-
-![Reconcile Loop](images/reconcile-loop.png) ([source](diagrams/reconcile-loop.mmd))
 
 ```mermaid
 flowchart TD
