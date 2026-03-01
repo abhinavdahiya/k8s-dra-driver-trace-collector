@@ -36,8 +36,8 @@ func newCheckpointTestDriver(t *testing.T) *Driver {
 			PipelineEntryPoint: "otelcol.exporter.otlp.default.input",
 		},
 		Scaling: config.ScalingSpec{
-			BytesPerUnit:      10240,
-			MinBytesPerSecond: 10240,
+			SpansPerUnit:      100,
+			MinSpansPerSecond: 100,
 			StreamsPerUnit:    10,
 			MaxRecvMsgSize:    "4MiB",
 		},
@@ -77,7 +77,7 @@ func TestSaveCheckpoint_Basic(t *testing.T) {
 		Listener: &ListenerState{
 			SocketPath:     "/var/run/alloy/uid-1/claim_uid-1.sock",
 			ConfigFile:     "claim-uid-1.alloy",
-			BytesPerSecond: 51200,
+			SpansPerSecond: 500,
 		},
 	}
 	err := drv.saveCheckpoint()
@@ -115,7 +115,7 @@ func TestLoadCheckpoint_Basic(t *testing.T) {
 		Listener: &ListenerState{
 			SocketPath:     "/var/run/alloy/uid-load/claim_uid-load.sock",
 			ConfigFile:     "claim-uid-load.alloy",
-			BytesPerSecond: 10240,
+			SpansPerSecond: 300,
 		},
 	}
 	err := drv.saveCheckpoint()
@@ -138,7 +138,7 @@ func TestLoadCheckpoint_Basic(t *testing.T) {
 	assert.Len(t, pc.Devices, 1)
 	assert.Equal(t, int64(30), pc.Devices[0].ConsumedCapacity)
 	require.NotNil(t, pc.Listener)
-	assert.Equal(t, 10240, pc.Listener.BytesPerSecond)
+	assert.Equal(t, 300, pc.Listener.SpansPerSecond)
 }
 
 func TestLoadCheckpoint_MissingFile(t *testing.T) {
@@ -180,7 +180,7 @@ func TestCheckpoint_RoundTrip(t *testing.T) {
 		Listener: &ListenerState{
 			SocketPath:     "/var/run/alloy/rt-1/claim_rt-1.sock",
 			ConfigFile:     "claim-rt-1.alloy",
-			BytesPerSecond: 10240,
+			SpansPerSecond: 300,
 		},
 	}
 	drv.prepared[types.UID("rt-2")] = &PreparedClaim{
@@ -193,7 +193,7 @@ func TestCheckpoint_RoundTrip(t *testing.T) {
 		Listener: &ListenerState{
 			SocketPath:     "/var/run/alloy/rt-2/claim_rt-2.sock",
 			ConfigFile:     "claim-rt-2.alloy",
-			BytesPerSecond: 102400,
+			SpansPerSecond: 1000,
 		},
 	}
 	err := drv.saveCheckpoint()
@@ -220,7 +220,7 @@ func TestCheckpoint_RoundTrip(t *testing.T) {
 	require.NotNil(t, pc2)
 	assert.Equal(t, "ns-b", pc2.Namespace)
 	assert.Equal(t, int64(100), pc2.TotalShares())
-	assert.Equal(t, 102400, pc2.Listener.BytesPerSecond)
+	assert.Equal(t, 1000, pc2.Listener.SpansPerSecond)
 }
 
 func TestCheckpoint_EmptyPrepared(t *testing.T) {

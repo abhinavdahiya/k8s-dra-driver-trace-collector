@@ -5,23 +5,49 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/abhinavdahiya/k8s-dra-driver-trace-collector/driver/config"
 )
 
-func TestComputeParams_SingleUnit(t *testing.T) {
-	scaling := ScalingConfig{
-		BytesPerUnit:      10240,
-		MinBytesPerSecond: 10240,
-		StreamsPerUnit:    10,
-		MaxRecvMsgSize:    "4MiB",
-		StepSize:          10,
-		DecisionWait:      "5s",
-		NumTraces:         50000,
+// testConfig returns a TraceDRADriverConfiguration with standard test values.
+func testConfig() *config.TraceDRADriverConfiguration {
+	return &config.TraceDRADriverConfiguration{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: config.APIVersion,
+			Kind:       config.Kind,
+		},
+		Driver: config.DriverSpec{
+			Name:        "trace.example.com",
+			TotalShares: 1000,
+			StepSize:    10,
+		},
+		Alloy: config.AlloySpec{
+			Address:            "http://127.0.0.1:12345",
+			SocketDir:          "/var/run/alloy",
+			PipelineEntryPoint: "otelcol.exporter.otlp.default.input",
+		},
+		Scaling: config.ScalingSpec{
+			SpansPerUnit:      100,
+			MinSpansPerSecond: 100,
+			StreamsPerUnit:    10,
+			MaxRecvMsgSize:    "4MiB",
+		},
+		RateLimiting: config.RateLimitingSpec{
+			DecisionWait: metav1.Duration{Duration: 5 * time.Second},
+			NumTraces:    50000,
+		},
 	}
+}
 
-	params := ComputeParams("abc-123-def", 10, scaling, "/var/run/alloy", "otelcol.exporter.otlp.default.input")
+func TestComputeParams_SingleUnit(t *testing.T) {
+	cfg := testConfig()
+
+	params := ComputeParams("abc-123-def", 10, cfg)
 
 	assert.Equal(t, "abc-123-def", params.ClaimUID)
 	assert.Equal(t, "claim_abc_123_def", params.Label)
@@ -29,67 +55,42 @@ func TestComputeParams_SingleUnit(t *testing.T) {
 	assert.Equal(t, "/var/run/alloy/abc-123-def/claim_abc-123-def.sock", params.SocketPath)
 	assert.Equal(t, 10, params.MaxConcurrentStreams)
 	assert.Equal(t, "4MiB", params.MaxRecvMsgSize)
-	assert.Equal(t, 10240, params.BytesPerSecond)
-	assert.Equal(t, 20480, params.BurstCapacity)
+	assert.Equal(t, 100, params.SpansPerSecond)
 	assert.Equal(t, "otelcol.exporter.otlp.default.input", params.PipelineEntryPoint)
 	assert.Equal(t, "5s", params.DecisionWait)
 	assert.Equal(t, 50000, params.NumTraces)
 }
 
 func TestComputeParams_MultipleUnits(t *testing.T) {
-	scaling := ScalingConfig{
-		BytesPerUnit:      10240,
-		MinBytesPerSecond: 10240,
-		StreamsPerUnit:    10,
-		MaxRecvMsgSize:    "4MiB",
-		StepSize:          10,
-		DecisionWait:      "5s",
-		NumTraces:         50000,
-	}
+	cfg := testConfig()
 
 	// 5 units = 50 shares
-	params := ComputeParams("uid-5-units", 50, scaling, "/var/run/alloy", "otelcol.exporter.otlp.default.input")
+	params := ComputeParams("uid-5-units", 50, cfg)
 
 	assert.Equal(t, 50, params.MaxConcurrentStreams) // 5 * 10
-	assert.Equal(t, 51200, params.BytesPerSecond)    // 5 * 10240
-	assert.Equal(t, 102400, params.BurstCapacity)    // 2 * 51200
+	assert.Equal(t, 500, params.SpansPerSecond)      // 5 * 100
 }
 
 func TestComputeParams_FloorApplied(t *testing.T) {
-	scaling := ScalingConfig{
-		BytesPerUnit:      100,
-		MinBytesPerSecond: 10240,
-		StreamsPerUnit:    10,
-		MaxRecvMsgSize:    "4MiB",
-		StepSize:          10,
-		DecisionWait:      "5s",
-		NumTraces:         50000,
-	}
+	cfg := testConfig()
+	cfg.Scaling.SpansPerUnit = 1
+	cfg.Alloy.PipelineEntryPoint = "entry.input"
 
-	// 1 unit = 10 shares; bps = 1*100 = 100 < floor 10240
-	params := ComputeParams("uid-floor", 10, scaling, "/var/run/alloy", "entry.input")
+	// 1 unit = 10 shares; sps = 1*1 = 1 < floor 100
+	params := ComputeParams("uid-floor", 10, cfg)
 
-	assert.Equal(t, 10240, params.BytesPerSecond)
-	assert.Equal(t, 20480, params.BurstCapacity)
+	assert.Equal(t, 100, params.SpansPerSecond)
 }
 
 func TestComputeParams_ZeroShares(t *testing.T) {
-	scaling := ScalingConfig{
-		BytesPerUnit:      10240,
-		MinBytesPerSecond: 10240,
-		StreamsPerUnit:    10,
-		MaxRecvMsgSize:    "4MiB",
-		StepSize:          10,
-		DecisionWait:      "5s",
-		NumTraces:         50000,
-	}
+	cfg := testConfig()
+	cfg.Alloy.PipelineEntryPoint = "entry.input"
 
 	// 0 shares = 0 units; floors kick in
-	params := ComputeParams("uid-zero", 0, scaling, "/var/run/alloy", "entry.input")
+	params := ComputeParams("uid-zero", 0, cfg)
 
 	assert.Equal(t, 1, params.MaxConcurrentStreams) // floor
-	assert.Equal(t, 10240, params.BytesPerSecond)   // floor
-	assert.Equal(t, 20480, params.BurstCapacity)    // 2 * floor
+	assert.Equal(t, 100, params.SpansPerSecond)     // floor
 }
 
 func TestRenderConfig(t *testing.T) {
@@ -100,8 +101,7 @@ func TestRenderConfig(t *testing.T) {
 		SocketPath:           "/var/run/alloy/abc-123-def/claim_abc-123-def.sock",
 		MaxConcurrentStreams: 50,
 		MaxRecvMsgSize:       "4MiB",
-		BytesPerSecond:       51200,
-		BurstCapacity:        102400,
+		SpansPerSecond:       500,
 		PipelineEntryPoint:   "otelcol.exporter.otlp.default.input",
 		DecisionWait:         "5s",
 		NumTraces:            50000,
@@ -132,12 +132,11 @@ otelcol.processor.tail_sampling "claim_abc_123_def" {
   num_traces    = 50000
 
   policy {
-    name = "bytes-limit"
-    type = "bytes_limiting"
+    name = "rate-limit"
+    type = "rate_limiting"
 
-    bytes_limiting {
-      bytes_per_second = 51200
-      burst_capacity   = 102400
+    rate_limiting {
+      spans_per_second = 500
     }
   }
 
@@ -202,21 +201,14 @@ func TestDeleteConfigFile_Idempotent(t *testing.T) {
 }
 
 func TestRenderConfig_LabelSanitization(t *testing.T) {
+	cfg := testConfig()
+	cfg.Alloy.PipelineEntryPoint = "entry.input"
+
 	// UUID-style claim UID with hyphens
 	params := ComputeParams(
 		"550e8400-e29b-41d4-a716-446655440000",
 		10,
-		ScalingConfig{
-			BytesPerUnit:      10240,
-			MinBytesPerSecond: 10240,
-			StreamsPerUnit:    10,
-			MaxRecvMsgSize:    "4MiB",
-			StepSize:          10,
-			DecisionWait:      "5s",
-			NumTraces:         50000,
-		},
-		"/var/run/alloy",
-		"entry.input",
+		cfg,
 	)
 
 	data, err := RenderConfig(params)

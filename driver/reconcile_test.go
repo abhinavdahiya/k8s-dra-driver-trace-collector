@@ -54,8 +54,8 @@ func newReconcileTestDriver(t *testing.T, reloader *fakeReloader) *Driver {
 			PipelineEntryPoint: "otelcol.exporter.otlp.default.input",
 		},
 		Scaling: config.ScalingSpec{
-			BytesPerUnit:      10240,
-			MinBytesPerSecond: 10240,
+			SpansPerUnit:      100,
+			MinSpansPerSecond: 100,
 			StreamsPerUnit:    10,
 			MaxRecvMsgSize:    "4MiB",
 		},
@@ -83,7 +83,7 @@ func addPreparedClaim(drv *Driver, uid string, shares int64) {
 	drv.mu.Lock()
 	defer drv.mu.Unlock()
 
-	params := alloy.ComputeParams(uid, shares, drv.scalingConfig, drv.socketDir, drv.pipelineEntryPoint)
+	params := alloy.ComputeParams(uid, shares, drv.cfg)
 	drv.prepared[types.UID(uid)] = &PreparedClaim{
 		ClaimUID:  types.UID(uid),
 		Namespace: "default",
@@ -99,7 +99,7 @@ func addPreparedClaim(drv *Driver, uid string, shares int64) {
 		Listener: &ListenerState{
 			SocketPath:     params.SocketPath,
 			ConfigFile:     alloy.ConfigFileName(uid),
-			BytesPerSecond: params.BytesPerSecond,
+			SpansPerSecond: params.SpansPerSecond,
 		},
 	}
 }
@@ -107,7 +107,7 @@ func addPreparedClaim(drv *Driver, uid string, shares int64) {
 // renderExpectedConfig renders the expected config for a claim UID
 // using the driver's scaling config.
 func renderExpectedConfig(drv *Driver, uid string, shares int64) []byte {
-	params := alloy.ComputeParams(uid, shares, drv.scalingConfig, drv.socketDir, drv.pipelineEntryPoint)
+	params := alloy.ComputeParams(uid, shares, drv.cfg)
 	content, err := alloy.RenderConfig(params)
 	if err != nil {
 		panic(fmt.Sprintf("renderExpectedConfig: %v", err))
@@ -156,9 +156,9 @@ func TestReconcile_CleanState(t *testing.T) {
 	addPreparedClaim(drv, uid, shares)
 
 	expected := renderExpectedConfig(drv, uid, shares)
-	require.NoError(t, alloy.WriteConfigFile(drv.configDir, uid, expected))
+	require.NoError(t, alloy.WriteConfigFile(drv.cfg.Alloy.ConfigDir, uid, expected))
 
-	params := alloy.ComputeParams(uid, shares, drv.scalingConfig, drv.socketDir, drv.pipelineEntryPoint)
+	params := alloy.ComputeParams(uid, shares, drv.cfg)
 	require.NoError(t, cdi.WriteSpec(drv.cdiDir, uid, params.SocketPath))
 
 	// Reconcile should be a no-op.
@@ -167,7 +167,7 @@ func TestReconcile_CleanState(t *testing.T) {
 	assert.Equal(t, 0, reloader.calls, "no reload when state is clean")
 
 	// Files should still exist.
-	_, err = os.Stat(filepath.Join(drv.configDir, alloy.ConfigFileName(uid)))
+	_, err = os.Stat(filepath.Join(drv.cfg.Alloy.ConfigDir, alloy.ConfigFileName(uid)))
 	assert.NoError(t, err)
 	_, err = os.Stat(filepath.Join(drv.cdiDir, "trace-"+uid+".json"))
 	assert.NoError(t, err)
@@ -182,14 +182,14 @@ func TestReconcile_MissingConfigFile(t *testing.T) {
 	addPreparedClaim(drv, uid, shares)
 
 	// CDI spec exists, but config file does NOT.
-	params := alloy.ComputeParams(uid, shares, drv.scalingConfig, drv.socketDir, drv.pipelineEntryPoint)
+	params := alloy.ComputeParams(uid, shares, drv.cfg)
 	require.NoError(t, cdi.WriteSpec(drv.cdiDir, uid, params.SocketPath))
 
 	err := drv.Reconcile(context.Background())
 	require.NoError(t, err)
 
 	// Config file should now exist with correct content.
-	actual, err := os.ReadFile(filepath.Join(drv.configDir, alloy.ConfigFileName(uid)))
+	actual, err := os.ReadFile(filepath.Join(drv.cfg.Alloy.ConfigDir, alloy.ConfigFileName(uid)))
 	require.NoError(t, err)
 	expected := renderExpectedConfig(drv, uid, shares)
 	assert.True(t, bytes.Equal(expected, actual), "config content mismatch")
@@ -204,13 +204,13 @@ func TestReconcile_OrphanConfigFile(t *testing.T) {
 
 	// No claims prepared, but an orphan config file exists.
 	orphanUID := "orphan-cfg-1"
-	writeOrphanConfig(t, drv.configDir, orphanUID)
+	writeOrphanConfig(t, drv.cfg.Alloy.ConfigDir, orphanUID)
 
 	err := drv.Reconcile(context.Background())
 	require.NoError(t, err)
 
 	// Orphan config file should be deleted.
-	_, err = os.Stat(filepath.Join(drv.configDir, alloy.ConfigFileName(orphanUID)))
+	_, err = os.Stat(filepath.Join(drv.cfg.Alloy.ConfigDir, alloy.ConfigFileName(orphanUID)))
 	assert.True(t, os.IsNotExist(err), "orphan config should be deleted")
 
 	// Reload because a config file was deleted.
@@ -227,17 +227,17 @@ func TestReconcile_StaleConfigContent(t *testing.T) {
 
 	// Write config with wrong content (stale).
 	staleContent := []byte("// stale config content")
-	require.NoError(t, alloy.WriteConfigFile(drv.configDir, uid, staleContent))
+	require.NoError(t, alloy.WriteConfigFile(drv.cfg.Alloy.ConfigDir, uid, staleContent))
 
 	// CDI spec exists.
-	params := alloy.ComputeParams(uid, shares, drv.scalingConfig, drv.socketDir, drv.pipelineEntryPoint)
+	params := alloy.ComputeParams(uid, shares, drv.cfg)
 	require.NoError(t, cdi.WriteSpec(drv.cdiDir, uid, params.SocketPath))
 
 	err := drv.Reconcile(context.Background())
 	require.NoError(t, err)
 
 	// Config should now have correct content.
-	actual, err := os.ReadFile(filepath.Join(drv.configDir, alloy.ConfigFileName(uid)))
+	actual, err := os.ReadFile(filepath.Join(drv.cfg.Alloy.ConfigDir, alloy.ConfigFileName(uid)))
 	require.NoError(t, err)
 	expected := renderExpectedConfig(drv, uid, shares)
 	assert.True(t, bytes.Equal(expected, actual), "stale config should be overwritten")
@@ -256,7 +256,7 @@ func TestReconcile_MissingCDISpec(t *testing.T) {
 
 	// Config file exists with correct content, but CDI spec is missing.
 	expected := renderExpectedConfig(drv, uid, shares)
-	require.NoError(t, alloy.WriteConfigFile(drv.configDir, uid, expected))
+	require.NoError(t, alloy.WriteConfigFile(drv.cfg.Alloy.ConfigDir, uid, expected))
 
 	err := drv.Reconcile(context.Background())
 	require.NoError(t, err)
@@ -294,13 +294,13 @@ func TestReconcile_OrphanSocket(t *testing.T) {
 
 	// No claims, but orphan socket file exists.
 	orphanUID := "orphan-sock-1"
-	writeOrphanSocketDir(t, drv.socketDir, orphanUID)
+	writeOrphanSocketDir(t, drv.cfg.Alloy.SocketDir, orphanUID)
 
 	err := drv.Reconcile(context.Background())
 	require.NoError(t, err)
 
 	// Orphan socket directory should be deleted.
-	_, err = os.Stat(filepath.Join(drv.socketDir, orphanUID))
+	_, err = os.Stat(filepath.Join(drv.cfg.Alloy.SocketDir, orphanUID))
 	assert.True(t, os.IsNotExist(err), "orphan socket directory should be deleted")
 
 	// No reload (socket changes don't require Alloy reload).
@@ -318,26 +318,26 @@ func TestReconcile_MultipleIssues(t *testing.T) {
 	// Claim 2: stale config, CDI exists.
 	uid2 := "multi-2"
 	addPreparedClaim(drv, uid2, 100)
-	require.NoError(t, alloy.WriteConfigFile(drv.configDir, uid2, []byte("// stale")))
-	params2 := alloy.ComputeParams(uid2, 100, drv.scalingConfig, drv.socketDir, drv.pipelineEntryPoint)
+	require.NoError(t, alloy.WriteConfigFile(drv.cfg.Alloy.ConfigDir, uid2, []byte("// stale")))
+	params2 := alloy.ComputeParams(uid2, 100, drv.cfg)
 	require.NoError(t, cdi.WriteSpec(drv.cdiDir, uid2, params2.SocketPath))
 
 	// Orphans: config file, CDI spec, socket.
-	writeOrphanConfig(t, drv.configDir, "orphan-multi-1")
+	writeOrphanConfig(t, drv.cfg.Alloy.ConfigDir, "orphan-multi-1")
 	writeOrphanCDI(t, drv.cdiDir, "orphan-multi-2")
-	writeOrphanSocketDir(t, drv.socketDir, "orphan-multi-3")
+	writeOrphanSocketDir(t, drv.cfg.Alloy.SocketDir, "orphan-multi-3")
 
 	err := drv.Reconcile(context.Background())
 	require.NoError(t, err)
 
 	// Claim 1 config should exist with correct content.
-	actual1, err := os.ReadFile(filepath.Join(drv.configDir, alloy.ConfigFileName(uid1)))
+	actual1, err := os.ReadFile(filepath.Join(drv.cfg.Alloy.ConfigDir, alloy.ConfigFileName(uid1)))
 	require.NoError(t, err)
 	expected1 := renderExpectedConfig(drv, uid1, 50)
 	assert.True(t, bytes.Equal(expected1, actual1))
 
 	// Claim 2 config should be overwritten.
-	actual2, err := os.ReadFile(filepath.Join(drv.configDir, alloy.ConfigFileName(uid2)))
+	actual2, err := os.ReadFile(filepath.Join(drv.cfg.Alloy.ConfigDir, alloy.ConfigFileName(uid2)))
 	require.NoError(t, err)
 	expected2 := renderExpectedConfig(drv, uid2, 100)
 	assert.True(t, bytes.Equal(expected2, actual2))
@@ -349,11 +349,11 @@ func TestReconcile_MultipleIssues(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Orphan files should all be deleted.
-	_, err = os.Stat(filepath.Join(drv.configDir, alloy.ConfigFileName("orphan-multi-1")))
+	_, err = os.Stat(filepath.Join(drv.cfg.Alloy.ConfigDir, alloy.ConfigFileName("orphan-multi-1")))
 	assert.True(t, os.IsNotExist(err))
 	_, err = os.Stat(filepath.Join(drv.cdiDir, "trace-orphan-multi-2.json"))
 	assert.True(t, os.IsNotExist(err))
-	_, err = os.Stat(filepath.Join(drv.socketDir, "orphan-multi-3"))
+	_, err = os.Stat(filepath.Join(drv.cfg.Alloy.SocketDir, "orphan-multi-3"))
 	assert.True(t, os.IsNotExist(err))
 
 	// Single reload for all config changes combined.
@@ -365,23 +365,23 @@ func TestReconcile_EmptyDesired(t *testing.T) {
 	drv := newReconcileTestDriver(t, reloader)
 
 	// No claims, but orphan files exist for everything.
-	writeOrphanConfig(t, drv.configDir, "empty-1")
-	writeOrphanConfig(t, drv.configDir, "empty-2")
+	writeOrphanConfig(t, drv.cfg.Alloy.ConfigDir, "empty-1")
+	writeOrphanConfig(t, drv.cfg.Alloy.ConfigDir, "empty-2")
 	writeOrphanCDI(t, drv.cdiDir, "empty-1")
 	writeOrphanCDI(t, drv.cdiDir, "empty-3")
-	writeOrphanSocketDir(t, drv.socketDir, "empty-1")
+	writeOrphanSocketDir(t, drv.cfg.Alloy.SocketDir, "empty-1")
 
 	err := drv.Reconcile(context.Background())
 	require.NoError(t, err)
 
 	// All orphans should be cleaned up.
-	entries, _ := os.ReadDir(drv.configDir)
+	entries, _ := os.ReadDir(drv.cfg.Alloy.ConfigDir)
 	assert.Empty(t, entries, "configDir should be empty after cleanup")
 
 	entries, _ = os.ReadDir(drv.cdiDir)
 	assert.Empty(t, entries, "cdiDir should be empty after cleanup")
 
-	entries, _ = os.ReadDir(drv.socketDir)
+	entries, _ = os.ReadDir(drv.cfg.Alloy.SocketDir)
 	assert.Empty(t, entries, "socketDir should be empty after cleanup")
 
 	// Reload because config files were deleted.
@@ -401,7 +401,7 @@ func TestReconcile_ReloadFailure(t *testing.T) {
 	assert.Contains(t, err.Error(), "bad config")
 
 	// Config file should still have been written (only reload failed).
-	_, statErr := os.Stat(filepath.Join(drv.configDir, alloy.ConfigFileName(uid)))
+	_, statErr := os.Stat(filepath.Join(drv.cfg.Alloy.ConfigDir, alloy.ConfigFileName(uid)))
 	assert.NoError(t, statErr, "config file should exist despite reload failure")
 
 	assert.Equal(t, 1, reloader.calls)
@@ -470,7 +470,7 @@ func TestReconciler_Shutdown(t *testing.T) {
 	drv := newReconcileTestDriver(t, reloader)
 
 	// Use a short reconcile interval so the timer fires at least once.
-	drv.reconcileInterval = 50 * time.Millisecond
+	drv.cfg.Reconciler.Interval.Duration = 50 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 

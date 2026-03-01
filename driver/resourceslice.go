@@ -21,7 +21,7 @@ func (d *Driver) BuildResources() resourceslice.DriverResources {
 		},
 		Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
 			"shares": {
-				Value: resource.MustParse(strconv.Itoa(d.totalShares)),
+				Value: resource.MustParse(strconv.Itoa(d.cfg.Driver.TotalShares)),
 				RequestPolicy: &resourceapi.CapacityRequestPolicy{
 					Default: ptr.To(resource.MustParse("10")),
 					ValidRange: &resourceapi.CapacityRequestPolicyRange{

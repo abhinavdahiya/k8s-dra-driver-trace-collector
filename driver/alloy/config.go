@@ -10,6 +10,7 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/abhinavdahiya/k8s-dra-driver-trace-collector/driver/config"
 	"github.com/abhinavdahiya/k8s-dra-driver-trace-collector/internal/atomicfile"
 )
 
@@ -22,42 +23,23 @@ type ConfigParams struct {
 	SocketPath           string // /var/run/alloy/<claimUID>.sock
 	MaxConcurrentStreams int    // scaled gRPC streams
 	MaxRecvMsgSize       string // e.g. "4MiB"
-	BytesPerSecond       int    // scaled bytes/sec rate limit
-	BurstCapacity        int    // 2 * BytesPerSecond
+	SpansPerSecond       int    // scaled spans/sec rate limit
 	PipelineEntryPoint   string // admin's pipeline entry component
 	DecisionWait         string // tail_sampling decision_wait (default "5s")
 	NumTraces            int    // tail_sampling num_traces (default 50000)
 }
 
-// ScalingConfig holds the per-unit scaling parameters extracted
-// from TraceDRADriverConfiguration. One unit = stepSize shares
-// = 1 extended resource.
-type ScalingConfig struct {
-	BytesPerUnit      int    // cfg.Scaling.BytesPerUnit
-	MinBytesPerSecond int    // cfg.Scaling.MinBytesPerSecond
-	StreamsPerUnit    int    // cfg.Scaling.StreamsPerUnit
-	MaxRecvMsgSize    string // cfg.Scaling.MaxRecvMsgSize
-	StepSize          int    // cfg.Driver.StepSize
-	DecisionWait      string // cfg.RateLimiting.DecisionWait formatted
-	NumTraces         int    // cfg.RateLimiting.NumTraces
-}
+// ComputeParams calculates the scaled ConfigParams for a claim
+// directly from the driver configuration.
+func ComputeParams(claimUID string, shares int64, cfg *config.TraceDRADriverConfiguration) ConfigParams {
+	units := int(shares) / cfg.Driver.StepSize
 
-// ComputeParams calculates the scaled AlloyConfigParams for a claim.
-func ComputeParams(
-	claimUID string,
-	shares int64,
-	scaling ScalingConfig,
-	socketDir string,
-	pipelineEntryPoint string,
-) ConfigParams {
-	units := int(shares) / scaling.StepSize
-
-	bps := units * scaling.BytesPerUnit
-	if bps < scaling.MinBytesPerSecond {
-		bps = scaling.MinBytesPerSecond
+	sps := units * cfg.Scaling.SpansPerUnit
+	if sps < cfg.Scaling.MinSpansPerSecond {
+		sps = cfg.Scaling.MinSpansPerSecond
 	}
 
-	streams := units * scaling.StreamsPerUnit
+	streams := units * cfg.Scaling.StreamsPerUnit
 	if streams < 1 {
 		streams = 1
 	}
@@ -70,14 +52,13 @@ func ComputeParams(
 		ClaimUID:             claimUID,
 		Label:                label,
 		Shares:               shares,
-		SocketPath:           filepath.Join(socketDir, claimUID, "claim_"+claimUID+".sock"),
+		SocketPath:           filepath.Join(cfg.Alloy.SocketDir, claimUID, "claim_"+claimUID+".sock"),
 		MaxConcurrentStreams: streams,
-		MaxRecvMsgSize:       scaling.MaxRecvMsgSize,
-		BytesPerSecond:       bps,
-		BurstCapacity:        2 * bps,
-		PipelineEntryPoint:   pipelineEntryPoint,
-		DecisionWait:         scaling.DecisionWait,
-		NumTraces:            scaling.NumTraces,
+		MaxRecvMsgSize:       cfg.Scaling.MaxRecvMsgSize,
+		SpansPerSecond:       sps,
+		PipelineEntryPoint:   cfg.Alloy.PipelineEntryPoint,
+		DecisionWait:         cfg.RateLimiting.DecisionWait.Duration.String(),
+		NumTraces:            cfg.RateLimiting.NumTraces,
 	}
 }
 
@@ -104,12 +85,11 @@ otelcol.processor.tail_sampling "{{ .Label }}" {
   num_traces    = {{ .NumTraces }}
 
   policy {
-    name = "bytes-limit"
-    type = "bytes_limiting"
+    name = "rate-limit"
+    type = "rate_limiting"
 
-    bytes_limiting {
-      bytes_per_second = {{ .BytesPerSecond }}
-      burst_capacity   = {{ .BurstCapacity }}
+    rate_limiting {
+      spans_per_second = {{ .SpansPerSecond }}
     }
   }
 

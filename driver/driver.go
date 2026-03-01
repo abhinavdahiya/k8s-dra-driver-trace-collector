@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
 
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -39,25 +38,16 @@ var _ kubeletplugin.DRAPlugin = (*Driver)(nil)
 // consumable shares and handles Prepare/Unprepare lifecycle calls.
 type Driver struct {
 	nodeName       string
-	driverName     string
-	totalShares    int
+	cfg            *config.TraceDRADriverConfiguration
 	checkpointPath string
 	cancelFunc     context.CancelFunc
 
-	cdiDir             string
-	scalingConfig      alloy.ScalingConfig
-	socketDir          string
-	configDir          string
-	adminConfigDir     string // if set, sync admin *.alloy files into configDir
-	pipelineEntryPoint string
+	cdiDir string
 
 	// Workqueue for trigger-based reconciliation.
 	// Prepare/Unprepare enqueue reconcileKey; the workqueue deduplicates.
 	queue    workqueue.TypedInterface[string]
 	reloader AlloyReloader
-
-	// reconcileInterval is the periodic safety-net timer interval.
-	reconcileInterval time.Duration
 
 	mu       sync.Mutex
 	prepared map[types.UID]*PreparedClaim
@@ -80,7 +70,7 @@ type PreparedClaim struct {
 type ListenerState struct {
 	SocketPath     string `json:"socketPath"`
 	ConfigFile     string `json:"configFile"`
-	BytesPerSecond int    `json:"bytesPerSecond"`
+	SpansPerSecond int    `json:"spansPerSecond"`
 }
 
 // PreparedDevice records a single allocation result from the
@@ -126,28 +116,13 @@ func New(opts DriverOptions) *Driver {
 
 	return &Driver{
 		nodeName:       opts.NodeName,
-		driverName:     cfg.Driver.Name,
-		totalShares:    cfg.Driver.TotalShares,
+		cfg:            cfg,
 		checkpointPath: filepath.Join(cfg.Driver.CheckpointDir, checkpointFileName),
 		cancelFunc:     opts.CancelFunc,
 		cdiDir:         cdiDir,
-		scalingConfig: alloy.ScalingConfig{
-			BytesPerUnit:      cfg.Scaling.BytesPerUnit,
-			MinBytesPerSecond: cfg.Scaling.MinBytesPerSecond,
-			StreamsPerUnit:    cfg.Scaling.StreamsPerUnit,
-			MaxRecvMsgSize:    cfg.Scaling.MaxRecvMsgSize,
-			StepSize:          cfg.Driver.StepSize,
-			DecisionWait:      fmt.Sprintf("%s", cfg.RateLimiting.DecisionWait.Duration),
-			NumTraces:         cfg.RateLimiting.NumTraces,
-		},
-		socketDir:          cfg.Alloy.SocketDir,
-		configDir:          cfg.Alloy.ConfigDir,
-		adminConfigDir:     cfg.Alloy.AdminConfigDir,
-		pipelineEntryPoint: cfg.Alloy.PipelineEntryPoint,
-		queue:              workqueue.NewTyped[string](),
-		reloader:           opts.Reloader,
-		reconcileInterval:  cfg.Reconciler.Interval.Duration,
-		prepared:           make(map[types.UID]*PreparedClaim),
+		queue:          workqueue.NewTyped[string](),
+		reloader:       opts.Reloader,
+		prepared:       make(map[types.UID]*PreparedClaim),
 	}
 }
 
@@ -193,7 +168,7 @@ func (d *Driver) PrepareResourceClaims(
 		// Collect allocation results for this driver.
 		var devices []PreparedDevice
 		for _, result := range claim.Status.Allocation.Devices.Results {
-			if result.Driver != d.driverName {
+			if result.Driver != d.cfg.Driver.Name {
 				continue
 			}
 			pd := PreparedDevice{
@@ -216,7 +191,7 @@ func (d *Driver) PrepareResourceClaims(
 		if len(devices) == 0 {
 			results[claim.UID] = kubeletplugin.PrepareResult{
 				Err: fmt.Errorf("claim %s/%s has no allocation results for driver %s",
-					claim.Namespace, claim.Name, d.driverName),
+					claim.Namespace, claim.Name, d.cfg.Driver.Name),
 			}
 			continue
 		}
@@ -233,9 +208,7 @@ func (d *Driver) PrepareResourceClaims(
 		params := alloy.ComputeParams(
 			claimUID,
 			pc.TotalShares(),
-			d.scalingConfig,
-			d.socketDir,
-			d.pipelineEntryPoint,
+			d.cfg,
 		)
 
 		// Write CDI spec synchronously (kubelet needs it immediately).
@@ -261,7 +234,7 @@ func (d *Driver) PrepareResourceClaims(
 		pc.Listener = &ListenerState{
 			SocketPath:     params.SocketPath,
 			ConfigFile:     alloy.ConfigFileName(claimUID),
-			BytesPerSecond: params.BytesPerSecond,
+			SpansPerSecond: params.SpansPerSecond,
 		}
 
 		// Store in prepared map.
@@ -280,7 +253,7 @@ func (d *Driver) PrepareResourceClaims(
 			"allocationResults", len(devices),
 			"totalShares", pc.TotalShares(),
 			"socketPath", params.SocketPath,
-			"bytesPerSecond", params.BytesPerSecond)
+			"spansPerSecond", params.SpansPerSecond)
 
 		results[claim.UID] = buildPrepareResult(pc)
 	}

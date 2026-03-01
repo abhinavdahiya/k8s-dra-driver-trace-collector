@@ -29,29 +29,23 @@ func (d *Driver) Reconcile(ctx context.Context) error {
 	desired := d.snapshotDesired()
 
 	// 2. Scan filesystem for actual state.
-	actualConfigs := scanGlob(d.configDir, "claim-*.alloy", "claim-", ".alloy")
+	actualConfigs := scanGlob(d.cfg.Alloy.ConfigDir, "claim-*.alloy", "claim-", ".alloy")
 	actualCDI := scanGlob(d.cdiDir, "trace-*.json", "trace-", ".json")
-	actualSocketDirs := scanDirs(d.socketDir)
+	actualSocketDirs := scanDirs(d.cfg.Alloy.SocketDir)
 
 	dirty := false // tracks whether Alloy reload is needed
 
 	// 3. Ensure desired claims have correct config files and CDI specs.
 	for uid, pc := range desired.claims {
 		// Config file: render expected content and compare.
-		params := alloy.ComputeParams(
-			uid,
-			pc.TotalShares(),
-			d.scalingConfig,
-			d.socketDir,
-			d.pipelineEntryPoint,
-		)
+		params := alloy.ComputeParams(uid, pc.TotalShares(), d.cfg)
 		expected, err := alloy.RenderConfig(params)
 		if err != nil {
 			klog.ErrorS(err, "failed to render config", "claimUID", uid)
 			continue
 		}
 
-		configPath := filepath.Join(d.configDir, alloy.ConfigFileName(uid))
+		configPath := filepath.Join(d.cfg.Alloy.ConfigDir, alloy.ConfigFileName(uid))
 		actual, readErr := os.ReadFile(configPath)
 		if readErr != nil || !bytes.Equal(actual, expected) {
 			if readErr != nil {
@@ -59,7 +53,7 @@ func (d *Driver) Reconcile(ctx context.Context) error {
 			} else {
 				klog.V(2).InfoS("overwriting stale config file", "claimUID", uid)
 			}
-			if err := alloy.WriteConfigFile(d.configDir, uid, expected); err != nil {
+			if err := alloy.WriteConfigFile(d.cfg.Alloy.ConfigDir, uid, expected); err != nil {
 				klog.ErrorS(err, "failed to write config file", "claimUID", uid)
 				continue
 			}
@@ -86,7 +80,7 @@ func (d *Driver) Reconcile(ctx context.Context) error {
 	for uid := range actualConfigs {
 		if _, ok := desired.claims[uid]; !ok {
 			klog.V(2).InfoS("deleting orphan config file", "claimUID", uid)
-			if err := alloy.DeleteConfigFile(d.configDir, uid); err != nil {
+			if err := alloy.DeleteConfigFile(d.cfg.Alloy.ConfigDir, uid); err != nil {
 				klog.ErrorS(err, "failed to delete orphan config", "claimUID", uid)
 			} else {
 				dirty = true
@@ -104,7 +98,7 @@ func (d *Driver) Reconcile(ctx context.Context) error {
 	for uid := range actualSocketDirs {
 		if _, ok := desired.claims[uid]; !ok {
 			klog.V(2).InfoS("deleting orphan socket directory", "claimUID", uid)
-			dirPath := filepath.Join(d.socketDir, uid)
+			dirPath := filepath.Join(d.cfg.Alloy.SocketDir, uid)
 			if err := os.RemoveAll(dirPath); err != nil {
 				klog.ErrorS(err, "failed to delete orphan socket directory", "claimUID", uid)
 			}
@@ -130,7 +124,7 @@ func (d *Driver) Reconcile(ctx context.Context) error {
 func (d *Driver) StartReconciler(ctx context.Context) {
 	// Periodic timer goroutine: enqueues reconcileKey on each tick.
 	go func() {
-		ticker := time.NewTicker(d.reconcileInterval)
+		ticker := time.NewTicker(d.cfg.Reconciler.Interval.Duration)
 		defer ticker.Stop()
 
 		for {
@@ -145,7 +139,7 @@ func (d *Driver) StartReconciler(ctx context.Context) {
 
 	// Worker goroutine: processes items from the workqueue.
 	go func() {
-		klog.InfoS("reconciler started", "interval", d.reconcileInterval)
+		klog.InfoS("reconciler started", "interval", d.cfg.Reconciler.Interval.Duration)
 		defer klog.InfoS("reconciler stopped")
 
 		for {
@@ -174,18 +168,18 @@ func (d *Driver) StartReconciler(ctx context.Context) {
 // method — it runs on its own timer. If any files changed, it
 // triggers an Alloy reload.
 func (d *Driver) StartAdminConfigSyncer(ctx context.Context) {
-	if d.adminConfigDir == "" {
+	if d.cfg.Alloy.AdminConfigDir == "" {
 		klog.InfoS("admin config sync disabled (adminConfigDir not set)")
 		return
 	}
 
 	go func() {
 		klog.InfoS("admin config syncer started",
-			"src", d.adminConfigDir, "dst", d.configDir,
-			"interval", d.reconcileInterval)
+			"src", d.cfg.Alloy.AdminConfigDir, "dst", d.cfg.Alloy.ConfigDir,
+			"interval", d.cfg.Reconciler.Interval.Duration)
 		defer klog.InfoS("admin config syncer stopped")
 
-		ticker := time.NewTicker(d.reconcileInterval)
+		ticker := time.NewTicker(d.cfg.Reconciler.Interval.Duration)
 		defer ticker.Stop()
 
 		for {
@@ -193,10 +187,10 @@ func (d *Driver) StartAdminConfigSyncer(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				changed, err := alloy.SyncAdminConfig(d.adminConfigDir, d.configDir)
+				changed, err := alloy.SyncAdminConfig(d.cfg.Alloy.AdminConfigDir, d.cfg.Alloy.ConfigDir)
 				if err != nil {
 					klog.ErrorS(err, "admin config sync failed, will retry",
-						"src", d.adminConfigDir, "dst", d.configDir)
+						"src", d.cfg.Alloy.AdminConfigDir, "dst", d.cfg.Alloy.ConfigDir)
 					continue
 				}
 				if changed && d.reloader != nil {

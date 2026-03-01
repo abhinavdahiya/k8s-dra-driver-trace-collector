@@ -22,8 +22,8 @@ func TestSetDefaults(t *testing.T) {
 	assert.Equal(t, "/etc/alloy/config", cfg.Alloy.ConfigDir)
 	assert.Equal(t, "/var/run/alloy", cfg.Alloy.SocketDir)
 	assert.Equal(t, "", cfg.Alloy.AdminConfigDir)
-	assert.Equal(t, 10240, cfg.Scaling.BytesPerUnit)
-	assert.Equal(t, 10240, cfg.Scaling.MinBytesPerSecond)
+	assert.Equal(t, 100, cfg.Scaling.SpansPerUnit)
+	assert.Equal(t, 100, cfg.Scaling.MinSpansPerSecond)
 	assert.Equal(t, 10, cfg.Scaling.StreamsPerUnit)
 	assert.Equal(t, "4MiB", cfg.Scaling.MaxRecvMsgSize)
 	assert.Equal(t, 5*time.Second, cfg.RateLimiting.DecisionWait.Duration)
@@ -45,8 +45,8 @@ func TestSetDefaults_PreservesExplicitValues(t *testing.T) {
 			PipelineEntryPoint: "otelcol.exporter.otlp.default.input",
 		},
 		Scaling: ScalingSpec{
-			BytesPerUnit:      20480,
-			MinBytesPerSecond: 5120,
+			SpansPerUnit:      200,
+			MinSpansPerSecond: 50,
 			StreamsPerUnit:    20,
 			MaxRecvMsgSize:    "8MiB",
 		},
@@ -66,8 +66,8 @@ func TestSetDefaults_PreservesExplicitValues(t *testing.T) {
 	assert.Equal(t, "http://alloy:9090", cfg.Alloy.Address)
 	assert.Equal(t, "/custom/config", cfg.Alloy.ConfigDir)
 	assert.Equal(t, "/custom/sockets", cfg.Alloy.SocketDir)
-	assert.Equal(t, 20480, cfg.Scaling.BytesPerUnit)
-	assert.Equal(t, 5120, cfg.Scaling.MinBytesPerSecond)
+	assert.Equal(t, 200, cfg.Scaling.SpansPerUnit)
+	assert.Equal(t, 50, cfg.Scaling.MinSpansPerSecond)
 	assert.Equal(t, 20, cfg.Scaling.StreamsPerUnit)
 	assert.Equal(t, "8MiB", cfg.Scaling.MaxRecvMsgSize)
 	assert.Equal(t, 10*time.Second, cfg.RateLimiting.DecisionWait.Duration)
@@ -89,7 +89,7 @@ func TestValidate_Valid(t *testing.T) {
 			PipelineEntryPoint: "otelcol.exporter.otlp.default.input",
 		},
 		Scaling: ScalingSpec{
-			BytesPerUnit: 10240,
+			SpansPerUnit: 100,
 		},
 		RateLimiting: RateLimitingSpec{
 			DecisionWait: metav1.Duration{Duration: 5 * time.Second},
@@ -143,11 +143,11 @@ func TestValidate_Errors(t *testing.T) {
 			wantErr: "driver.stepSize must be positive",
 		},
 		{
-			name: "zero bytesPerUnit",
+			name: "zero spansPerUnit",
 			mutate: func(cfg *TraceDRADriverConfiguration) {
-				cfg.Scaling.BytesPerUnit = 0
+				cfg.Scaling.SpansPerUnit = 0
 			},
-			wantErr: "scaling.bytesPerUnit must be positive",
+			wantErr: "scaling.spansPerUnit must be positive",
 		},
 		{
 			name: "negative decisionWait",
@@ -221,8 +221,8 @@ alloy:
   socketDir: /custom/sockets
   pipelineEntryPoint: otelcol.processor.memory_limiter.global.input
 scaling:
-  bytesPerUnit: 20480
-  minBytesPerSecond: 5120
+  spansPerUnit: 200
+  minSpansPerSecond: 50
   streamsPerUnit: 20
   maxRecvMsgSize: 8MiB
 rateLimiting:
@@ -238,7 +238,7 @@ reconciler:
 	assert.Equal(t, 500, cfg.Driver.TotalShares)
 	assert.Equal(t, 5, cfg.Driver.StepSize)
 	assert.Equal(t, "http://alloy:9090", cfg.Alloy.Address)
-	assert.Equal(t, 20480, cfg.Scaling.BytesPerUnit)
+	assert.Equal(t, 200, cfg.Scaling.SpansPerUnit)
 	assert.Equal(t, 10*time.Second, cfg.RateLimiting.DecisionWait.Duration)
 	assert.Equal(t, 100000, cfg.RateLimiting.NumTraces)
 	assert.Equal(t, 60*time.Second, cfg.Reconciler.Interval.Duration)

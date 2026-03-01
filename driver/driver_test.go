@@ -105,8 +105,8 @@ func newTestDriver(t *testing.T) *Driver {
 			PipelineEntryPoint: "otelcol.exporter.otlp.default.input",
 		},
 		Scaling: config.ScalingSpec{
-			BytesPerUnit:      10240,
-			MinBytesPerSecond: 10240,
+			SpansPerUnit:      100,
+			MinSpansPerSecond: 100,
 			StreamsPerUnit:    10,
 			MaxRecvMsgSize:    "4MiB",
 		},
@@ -351,12 +351,12 @@ func TestPrepare_ListenerState(t *testing.T) {
 	pc := drv.prepared[types.UID("uid-ls")]
 	require.NotNil(t, pc)
 	require.NotNil(t, pc.Listener)
-	assert.Equal(t, filepath.Join(drv.socketDir, "uid-ls", "claim_uid-ls.sock"), pc.Listener.SocketPath)
+	assert.Equal(t, filepath.Join(drv.cfg.Alloy.SocketDir, "uid-ls", "claim_uid-ls.sock"), pc.Listener.SocketPath)
 	assert.Equal(t, "claim-uid-ls.alloy", pc.Listener.ConfigFile)
-	assert.Equal(t, 51200, pc.Listener.BytesPerSecond) // 5 units * 10240
+	assert.Equal(t, 500, pc.Listener.SpansPerSecond) // 5 units * 100
 
 	// Verify the per-claim socket directory was created.
-	info, err := os.Stat(filepath.Join(drv.socketDir, "uid-ls"))
+	info, err := os.Stat(filepath.Join(drv.cfg.Alloy.SocketDir, "uid-ls"))
 	require.NoError(t, err, "socket directory should exist after Prepare")
 	assert.True(t, info.IsDir(), "socket path should be a directory")
 }

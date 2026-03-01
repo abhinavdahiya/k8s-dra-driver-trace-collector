@@ -32,8 +32,8 @@ func newTestDriverForSlice(t *testing.T, nodeName string, totalShares int) *Driv
 			PipelineEntryPoint: "otelcol.exporter.otlp.default.input",
 		},
 		Scaling: config.ScalingSpec{
-			BytesPerUnit:      10240,
-			MinBytesPerSecond: 10240,
+			SpansPerUnit:      100,
+			MinSpansPerSecond: 100,
 			StreamsPerUnit:    10,
 			MaxRecvMsgSize:    "4MiB",
 		},

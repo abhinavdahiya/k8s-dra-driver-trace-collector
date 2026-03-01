@@ -38,7 +38,7 @@ type TraceDRADriverConfiguration struct {
 	Scaling ScalingSpec `json:"scaling" yaml:"scaling"`
 
 	// Per-pod rate limiting settings (implemented via tail_sampling
-	// bytes_limiting policy).
+	// rate_limiting policy).
 	RateLimiting RateLimitingSpec `json:"rateLimiting" yaml:"rateLimiting"`
 
 	// Reconciler loop settings.
@@ -97,15 +97,15 @@ type AlloySpec struct {
 
 // ScalingSpec configures per-unit scaling parameters.
 type ScalingSpec struct {
-	// BytesPerUnit is the bytes/sec rate limit per unit
+	// SpansPerUnit is the spans/sec rate limit per unit
 	// (1 unit = driver.stepSize shares).
-	// Default: 10240
-	BytesPerUnit int `json:"bytesPerUnit" yaml:"bytesPerUnit"`
+	// Default: 100
+	SpansPerUnit int `json:"spansPerUnit" yaml:"spansPerUnit"`
 
-	// MinBytesPerSecond is the floor for the bytes/sec rate limit.
+	// MinSpansPerSecond is the floor for the spans/sec rate limit.
 	// Guarantees minimum throughput even for a 1-unit claim.
-	// Default: 10240
-	MinBytesPerSecond int `json:"minBytesPerSecond" yaml:"minBytesPerSecond"`
+	// Default: 100
+	MinSpansPerSecond int `json:"minSpansPerSecond" yaml:"minSpansPerSecond"`
 
 	// StreamsPerUnit is the gRPC max_concurrent_streams per unit.
 	// Default: 10
@@ -118,7 +118,7 @@ type ScalingSpec struct {
 }
 
 // RateLimitingSpec configures per-pod rate limiting (implemented via
-// tail_sampling bytes_limiting policy).
+// tail_sampling rate_limiting policy).
 type RateLimitingSpec struct {
 	// DecisionWait is how long the rate limiter buffers spans for a
 	// trace before making a sampling decision. Maps to
@@ -185,11 +185,11 @@ func SetDefaults(cfg *TraceDRADriverConfiguration) {
 	if cfg.Alloy.SocketDir == "" {
 		cfg.Alloy.SocketDir = "/var/run/alloy"
 	}
-	if cfg.Scaling.BytesPerUnit == 0 {
-		cfg.Scaling.BytesPerUnit = 10240
+	if cfg.Scaling.SpansPerUnit == 0 {
+		cfg.Scaling.SpansPerUnit = 100
 	}
-	if cfg.Scaling.MinBytesPerSecond == 0 {
-		cfg.Scaling.MinBytesPerSecond = 10240
+	if cfg.Scaling.MinSpansPerSecond == 0 {
+		cfg.Scaling.MinSpansPerSecond = 100
 	}
 	if cfg.Scaling.StreamsPerUnit == 0 {
 		cfg.Scaling.StreamsPerUnit = 10
@@ -228,8 +228,8 @@ func Validate(cfg *TraceDRADriverConfiguration) error {
 	if cfg.Driver.StepSize <= 0 {
 		errs = append(errs, "driver.stepSize must be positive")
 	}
-	if cfg.Scaling.BytesPerUnit <= 0 {
-		errs = append(errs, "scaling.bytesPerUnit must be positive")
+	if cfg.Scaling.SpansPerUnit <= 0 {
+		errs = append(errs, "scaling.spansPerUnit must be positive")
 	}
 	if cfg.RateLimiting.DecisionWait.Duration < 0 {
 		errs = append(errs, "rateLimiting.decisionWait must not be negative")
