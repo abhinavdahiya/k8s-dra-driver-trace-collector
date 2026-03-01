@@ -3,8 +3,11 @@ package driver
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -14,6 +17,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/utils/ptr"
+
+	"github.com/abhinavdahiya/k8s-dra-driver-trace-collector/driver/config"
 )
 
 const testDriverName = "trace.example.com"
@@ -80,12 +85,49 @@ func fakeExtendedResourceClaim(uid, name, ns string, count int) *resourceapi.Res
 	}
 }
 
-func newTestDriver() *Driver {
-	return New("node-1", testDriverName, 1000, func() {})
+func newTestDriver(t *testing.T) *Driver {
+	t.Helper()
+	cfg := &config.TraceDRADriverConfiguration{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: config.APIVersion,
+			Kind:       config.Kind,
+		},
+		Driver: config.DriverSpec{
+			Name:          testDriverName,
+			TotalShares:   1000,
+			StepSize:      10,
+			CheckpointDir: t.TempDir(),
+		},
+		Alloy: config.AlloySpec{
+			Address:            "http://127.0.0.1:12345",
+			ConfigDir:          t.TempDir(),
+			SocketDir:          t.TempDir(),
+			PipelineEntryPoint: "otelcol.exporter.otlp.default.input",
+		},
+		Scaling: config.ScalingSpec{
+			BytesPerUnit:      10240,
+			MinBytesPerSecond: 10240,
+			StreamsPerUnit:    10,
+			MaxRecvMsgSize:    "4MiB",
+		},
+		RateLimiting: config.RateLimitingSpec{
+			DecisionWait: metav1.Duration{Duration: 5 * time.Second},
+			NumTraces:    50000,
+		},
+		Reconciler: config.ReconcilerSpec{
+			Interval: metav1.Duration{Duration: 30 * time.Second},
+		},
+	}
+	return New(DriverOptions{
+		NodeName:   "node-1",
+		CDIDir:     t.TempDir(),
+		Config:     cfg,
+		CancelFunc: func() {},
+	})
 }
 
 func TestPrepare_ExplicitClaim(t *testing.T) {
-	drv := newTestDriver()
+	drv := newTestDriver(t)
 	claim := fakeExplicitClaim("uid-1", "my-traces", "default", 50)
 
 	results, err := drv.PrepareResourceClaims(context.Background(), []*resourceapi.ResourceClaim{claim})
@@ -108,7 +150,7 @@ func TestPrepare_ExplicitClaim(t *testing.T) {
 }
 
 func TestPrepare_ExtendedResource(t *testing.T) {
-	drv := newTestDriver()
+	drv := newTestDriver(t)
 	claim := fakeExtendedResourceClaim("uid-2", "auto-claim", "default", 50)
 
 	results, err := drv.PrepareResourceClaims(context.Background(), []*resourceapi.ResourceClaim{claim})
@@ -127,7 +169,7 @@ func TestPrepare_ExtendedResource(t *testing.T) {
 }
 
 func TestPrepare_Idempotent(t *testing.T) {
-	drv := newTestDriver()
+	drv := newTestDriver(t)
 	claim := fakeExplicitClaim("uid-3", "idem-claim", "default", 25)
 
 	// First call.
@@ -149,7 +191,7 @@ func TestPrepare_Idempotent(t *testing.T) {
 }
 
 func TestPrepare_MultiClaim(t *testing.T) {
-	drv := newTestDriver()
+	drv := newTestDriver(t)
 	claims := []*resourceapi.ResourceClaim{
 		fakeExplicitClaim("uid-a", "claim-a", "ns-1", 10),
 		fakeExplicitClaim("uid-b", "claim-b", "ns-1", 20),
@@ -167,7 +209,7 @@ func TestPrepare_MultiClaim(t *testing.T) {
 }
 
 func TestPrepare_NoAllocation(t *testing.T) {
-	drv := newTestDriver()
+	drv := newTestDriver(t)
 	claim := &resourceapi.ResourceClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			UID:       types.UID("uid-nil"),
@@ -185,7 +227,7 @@ func TestPrepare_NoAllocation(t *testing.T) {
 }
 
 func TestPrepare_WrongDriver(t *testing.T) {
-	drv := newTestDriver()
+	drv := newTestDriver(t)
 	claim := &resourceapi.ResourceClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			UID:       types.UID("uid-wrong"),
@@ -216,7 +258,7 @@ func TestPrepare_WrongDriver(t *testing.T) {
 }
 
 func TestPrepare_ShareID(t *testing.T) {
-	drv := newTestDriver()
+	drv := newTestDriver(t)
 	claim := fakeExplicitClaim("uid-share", "share-claim", "default", 10)
 
 	results, err := drv.PrepareResourceClaims(context.Background(), []*resourceapi.ResourceClaim{claim})
@@ -229,7 +271,7 @@ func TestPrepare_ShareID(t *testing.T) {
 }
 
 func TestUnprepare_Basic(t *testing.T) {
-	drv := newTestDriver()
+	drv := newTestDriver(t)
 	claim := fakeExplicitClaim("uid-unprep", "unprep-claim", "default", 30)
 
 	// Prepare first.
@@ -247,7 +289,7 @@ func TestUnprepare_Basic(t *testing.T) {
 }
 
 func TestUnprepare_Idempotent(t *testing.T) {
-	drv := newTestDriver()
+	drv := newTestDriver(t)
 
 	// Unprepare a claim that was never prepared.
 	results, err := drv.UnprepareResourceClaims(context.Background(), []kubeletplugin.NamespacedObject{
@@ -258,7 +300,7 @@ func TestUnprepare_Idempotent(t *testing.T) {
 }
 
 func TestUnprepare_Unknown(t *testing.T) {
-	drv := newTestDriver()
+	drv := newTestDriver(t)
 
 	// Unprepare a random UID.
 	results, err := drv.UnprepareResourceClaims(context.Background(), []kubeletplugin.NamespacedObject{
@@ -278,4 +320,74 @@ func TestTotalShares(t *testing.T) {
 		},
 	}
 	assert.Equal(t, int64(100), pc.TotalShares())
+}
+
+func TestPrepare_WritesCDISpec(t *testing.T) {
+	drv := newTestDriver(t)
+	claim := fakeExplicitClaim("uid-cdi", "cdi-claim", "default", 50)
+
+	results, err := drv.PrepareResourceClaims(context.Background(), []*resourceapi.ResourceClaim{claim})
+	require.NoError(t, err)
+	require.NoError(t, results[types.UID("uid-cdi")].Err)
+
+	// CDI device ID should be set on the result.
+	r := results[types.UID("uid-cdi")]
+	require.Len(t, r.Devices, 1)
+	assert.Equal(t, []string{"trace.example.com/trace=uid-cdi"}, r.Devices[0].CDIDeviceIDs)
+
+	// Verify CDI spec file exists in cdiDir.
+	cdiFile := filepath.Join(drv.cdiDir, "trace-uid-cdi.json")
+	_, err = os.Stat(cdiFile)
+	assert.NoError(t, err, "CDI spec file should exist")
+}
+
+func TestPrepare_ListenerState(t *testing.T) {
+	drv := newTestDriver(t)
+	claim := fakeExplicitClaim("uid-ls", "ls-claim", "default", 50)
+
+	_, err := drv.PrepareResourceClaims(context.Background(), []*resourceapi.ResourceClaim{claim})
+	require.NoError(t, err)
+
+	pc := drv.prepared[types.UID("uid-ls")]
+	require.NotNil(t, pc)
+	require.NotNil(t, pc.Listener)
+	assert.Equal(t, filepath.Join(drv.socketDir, "uid-ls", "claim_uid-ls.sock"), pc.Listener.SocketPath)
+	assert.Equal(t, "claim-uid-ls.alloy", pc.Listener.ConfigFile)
+	assert.Equal(t, 51200, pc.Listener.BytesPerSecond) // 5 units * 10240
+
+	// Verify the per-claim socket directory was created.
+	info, err := os.Stat(filepath.Join(drv.socketDir, "uid-ls"))
+	require.NoError(t, err, "socket directory should exist after Prepare")
+	assert.True(t, info.IsDir(), "socket path should be a directory")
+}
+
+func TestPrepare_TriggersReconcile(t *testing.T) {
+	drv := newTestDriver(t)
+	claim := fakeExplicitClaim("uid-rec", "rec-claim", "default", 10)
+
+	_, err := drv.PrepareResourceClaims(context.Background(), []*resourceapi.ResourceClaim{claim})
+	require.NoError(t, err)
+
+	// Workqueue should have the reconcile key queued.
+	assert.Equal(t, 1, drv.queue.Len(), "expected reconcile key in workqueue after Prepare")
+}
+
+func TestUnprepare_TriggersReconcile(t *testing.T) {
+	drv := newTestDriver(t)
+	claim := fakeExplicitClaim("uid-unrec", "unrec-claim", "default", 10)
+
+	_, err := drv.PrepareResourceClaims(context.Background(), []*resourceapi.ResourceClaim{claim})
+	require.NoError(t, err)
+
+	// Drain the prepare trigger.
+	key, shutdown := drv.queue.Get()
+	require.False(t, shutdown)
+	drv.queue.Done(key)
+
+	_, err = drv.UnprepareResourceClaims(context.Background(), []kubeletplugin.NamespacedObject{
+		{NamespacedName: types.NamespacedName{Name: "unrec-claim", Namespace: "default"}, UID: types.UID("uid-unrec")},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, drv.queue.Len(), "expected reconcile key in workqueue after Unprepare")
 }

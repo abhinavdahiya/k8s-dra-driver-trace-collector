@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-admin-config
+  namespace: trace-dra-test
+data:
+  base.alloy: |
+    // Admin-managed base Alloy config.
+    // This pipeline receives traces from per-pod processors and exports them.
+    // The sidecar never modifies this file.
+
+    otelcol.exporter.otlp "default" {
+      client {
+        // Replace with your backend OTLP endpoint.
+        endpoint = "localhost:4317"
+
+        tls {
+          insecure = true
+        }
+      }
+    }

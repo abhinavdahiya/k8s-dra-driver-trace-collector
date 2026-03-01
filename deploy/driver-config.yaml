@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trace-dra-driver-config
+  namespace: trace-dra-test
+data:
+  config.yaml: |
+    apiVersion: trace.example.com/v1alpha1
+    kind: TraceDRADriverConfiguration
+    driver:
+      name: trace.example.com
+      totalShares: 1000
+      stepSize: 10
+    alloy:
+      address: http://127.0.0.1:12345
+      configDir: /etc/alloy/config
+      adminConfigDir: /admin-config
+      socketDir: /var/run/alloy
+      pipelineEntryPoint: otelcol.exporter.otlp.default.input
+    scaling:
+      bytesPerUnit: 10240
+      minBytesPerSecond: 10240
+      streamsPerUnit: 10
+      maxRecvMsgSize: 4MiB
+    rateLimiting:
+      decisionWait: 5s
+      numTraces: 50000
+    reconciler:
+      interval: 30s

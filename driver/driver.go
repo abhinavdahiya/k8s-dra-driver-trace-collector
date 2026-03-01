@@ -5,13 +5,31 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
+	"time"
 
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/workqueue"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/klog/v2"
+
+	"github.com/abhinavdahiya/k8s-dra-driver-trace-collector/driver/alloy"
+	"github.com/abhinavdahiya/k8s-dra-driver-trace-collector/driver/cdi"
+	"github.com/abhinavdahiya/k8s-dra-driver-trace-collector/driver/config"
 )
+
+// reconcileKey is the single key used in the workqueue. All reconcile
+// triggers enqueue this key; the workqueue deduplicates naturally.
+const reconcileKey = "reconcile"
+
+// AlloyReloader is the interface for triggering Alloy config reloads.
+// Implemented by alloy.Client; substituted in tests.
+type AlloyReloader interface {
+	Reload(ctx context.Context) error
+}
 
 // Compile-time interface assertion.
 var _ kubeletplugin.DRAPlugin = (*Driver)(nil)
@@ -26,6 +44,22 @@ type Driver struct {
 	checkpointPath string
 	cancelFunc     context.CancelFunc
 
+	// Listener management (M4).
+	cdiDir             string
+	scalingConfig      alloy.ScalingConfig
+	socketDir          string
+	configDir          string
+	adminConfigDir     string // if set, sync admin *.alloy files into configDir
+	pipelineEntryPoint string
+
+	// Reconciler (M5): client-go workqueue for trigger-based reconciliation.
+	// Prepare/Unprepare enqueue reconcileKey; the workqueue deduplicates.
+	queue    workqueue.TypedInterface[string]
+	reloader AlloyReloader
+
+	// reconcileInterval is the periodic safety-net timer interval.
+	reconcileInterval time.Duration
+
 	mu       sync.Mutex
 	prepared map[types.UID]*PreparedClaim
 }
@@ -38,6 +72,17 @@ type PreparedClaim struct {
 	Namespace string
 	Name      string
 	Devices   []PreparedDevice
+
+	// Listener state (M4). Nil when listener management is disabled.
+	Listener *ListenerState `json:"listener,omitempty"`
+}
+
+// ListenerState records the per-pod listener resources created for
+// a prepared claim. Used for reconciliation and cleanup.
+type ListenerState struct {
+	SocketPath     string `json:"socketPath"`
+	ConfigFile     string `json:"configFile"`
+	BytesPerSecond int    `json:"bytesPerSecond"`
 }
 
 // PreparedDevice records a single allocation result from the
@@ -63,20 +108,61 @@ func (pc *PreparedClaim) TotalShares() int64 {
 	return total
 }
 
-// New creates a new Driver instance.
-func New(nodeName, driverName string, totalShares int, cancel context.CancelFunc) *Driver {
+// DriverOptions configures a new Driver instance.
+type DriverOptions struct {
+	NodeName   string
+	CDIDir     string // default: /var/run/cdi
+	Config     *config.TraceDRADriverConfiguration
+	CancelFunc context.CancelFunc
+	Reloader   AlloyReloader // Alloy reload client; nil disables reloads
+}
+
+// New creates a new Driver instance from the given options.
+func New(opts DriverOptions) *Driver {
+	cfg := opts.Config
+
+	cdiDir := opts.CDIDir
+	if cdiDir == "" {
+		cdiDir = "/var/run/cdi"
+	}
+
 	return &Driver{
-		nodeName:    nodeName,
-		driverName:  driverName,
-		totalShares: totalShares,
-		cancelFunc:  cancel,
-		prepared:    make(map[types.UID]*PreparedClaim),
+		nodeName:       opts.NodeName,
+		driverName:     cfg.Driver.Name,
+		totalShares:    cfg.Driver.TotalShares,
+		checkpointPath: filepath.Join(cfg.Driver.CheckpointDir, checkpointFileName),
+		cancelFunc:     opts.CancelFunc,
+		cdiDir:         cdiDir,
+		scalingConfig: alloy.ScalingConfig{
+			BytesPerUnit:      cfg.Scaling.BytesPerUnit,
+			MinBytesPerSecond: cfg.Scaling.MinBytesPerSecond,
+			StreamsPerUnit:    cfg.Scaling.StreamsPerUnit,
+			MaxRecvMsgSize:    cfg.Scaling.MaxRecvMsgSize,
+			StepSize:          cfg.Driver.StepSize,
+			DecisionWait:      fmt.Sprintf("%s", cfg.RateLimiting.DecisionWait.Duration),
+			NumTraces:         cfg.RateLimiting.NumTraces,
+		},
+		socketDir:          cfg.Alloy.SocketDir,
+		configDir:          cfg.Alloy.ConfigDir,
+		adminConfigDir:     cfg.Alloy.AdminConfigDir,
+		pipelineEntryPoint: cfg.Alloy.PipelineEntryPoint,
+		queue:              workqueue.NewTyped[string](),
+		reloader:           opts.Reloader,
+		reconcileInterval:  cfg.Reconciler.Interval.Duration,
+		prepared:           make(map[types.UID]*PreparedClaim),
 	}
 }
 
+// triggerReconcile enqueues a reconcile request. The workqueue
+// deduplicates: if reconcileKey is already queued, this is a no-op.
+func (d *Driver) triggerReconcile() {
+	d.queue.Add(reconcileKey)
+}
+
 // PrepareResourceClaims handles the claim preparation lifecycle. For each
-// claim it collects allocation results belonging to this driver, records
-// them in an in-memory map, and returns device mappings to the kubelet.
+// claim it collects allocation results belonging to this driver, writes
+// a CDI spec (synchronously), records state, and triggers the reconciler
+// to create the Alloy config asynchronously.
 func (d *Driver) PrepareResourceClaims(
 	ctx context.Context,
 	claims []*resourceapi.ResourceClaim,
@@ -85,7 +171,11 @@ func (d *Driver) PrepareResourceClaims(
 	defer d.mu.Unlock()
 
 	results := make(map[types.UID]kubeletplugin.PrepareResult, len(claims))
+	needsReconcile := false
+
 	for _, claim := range claims {
+		claimUID := string(claim.UID)
+
 		// Idempotency check: if already prepared, return cached result.
 		if pc, ok := d.prepared[claim.UID]; ok {
 			klog.V(2).InfoS("claim already prepared, returning cached result",
@@ -133,42 +223,95 @@ func (d *Driver) PrepareResourceClaims(
 			continue
 		}
 
-		// Record the prepared claim.
+		// Build the prepared claim.
 		pc := &PreparedClaim{
 			ClaimUID:  claim.UID,
 			Namespace: claim.Namespace,
 			Name:      claim.Name,
 			Devices:   devices,
 		}
+
+		// Compute scaled parameters for the listener.
+		params := alloy.ComputeParams(
+			claimUID,
+			pc.TotalShares(),
+			d.scalingConfig,
+			d.socketDir,
+			d.pipelineEntryPoint,
+		)
+
+		// Write CDI spec synchronously (kubelet needs it immediately).
+		if err := cdi.WriteSpec(d.cdiDir, claimUID, params.SocketPath); err != nil {
+			results[claim.UID] = kubeletplugin.PrepareResult{
+				Err: fmt.Errorf("writing CDI spec for claim %s: %w", claimUID, err),
+			}
+			continue
+		}
+
+		// Create the per-claim socket directory so the CDI directory
+		// bind mount succeeds. Alloy will create the actual socket
+		// inside this directory when the listener starts.
+		socketDir := filepath.Dir(params.SocketPath)
+		if err := os.MkdirAll(socketDir, 0755); err != nil {
+			results[claim.UID] = kubeletplugin.PrepareResult{
+				Err: fmt.Errorf("creating socket directory for claim %s: %w", claimUID, err),
+			}
+			continue
+		}
+
+		// Record listener state.
+		pc.Listener = &ListenerState{
+			SocketPath:     params.SocketPath,
+			ConfigFile:     alloy.ConfigFileName(claimUID),
+			BytesPerSecond: params.BytesPerSecond,
+		}
+
+		// Store in prepared map.
 		d.prepared[claim.UID] = pc
+		needsReconcile = true
+
+		// Save checkpoint (best-effort).
+		if err := d.saveCheckpoint(); err != nil {
+			klog.ErrorS(err, "checkpoint save failed after prepare", "claimUID", claimUID)
+		}
 
 		klog.InfoS("preparing claim",
 			"claimUID", claim.UID,
 			"namespace", claim.Namespace,
 			"name", claim.Name,
 			"allocationResults", len(devices),
-			"totalShares", pc.TotalShares())
+			"totalShares", pc.TotalShares(),
+			"socketPath", params.SocketPath,
+			"bytesPerSecond", params.BytesPerSecond)
 
 		results[claim.UID] = buildPrepareResult(pc)
 	}
+
+	if needsReconcile {
+		d.triggerReconcile()
+	}
+
 	return results, nil
 }
 
 // buildPrepareResult converts a PreparedClaim into the kubeletplugin.PrepareResult
-// that the kubelet expects.
+// that the kubelet expects, including CDI device IDs.
 func buildPrepareResult(pc *PreparedClaim) kubeletplugin.PrepareResult {
+	cdiDeviceID := cdi.DeviceID(string(pc.ClaimUID))
 	kDevices := make([]kubeletplugin.Device, len(pc.Devices))
 	for i, pd := range pc.Devices {
 		kDevices[i] = kubeletplugin.Device{
-			Requests:   []string{pd.Request},
-			PoolName:   pd.Pool,
-			DeviceName: pd.Device,
+			Requests:     []string{pd.Request},
+			PoolName:     pd.Pool,
+			DeviceName:   pd.Device,
+			CDIDeviceIDs: []string{cdiDeviceID},
 		}
 	}
 	return kubeletplugin.PrepareResult{Devices: kDevices}
 }
 
-// UnprepareResourceClaims removes prepared claims from the in-memory map.
+// UnprepareResourceClaims removes prepared claims from the in-memory map
+// and triggers the reconciler to clean up Alloy configs and CDI specs.
 // This is idempotent: unpreparing an unknown claim is a no-op.
 func (d *Driver) UnprepareResourceClaims(
 	ctx context.Context,
@@ -178,11 +321,28 @@ func (d *Driver) UnprepareResourceClaims(
 	defer d.mu.Unlock()
 
 	results := make(map[types.UID]error, len(claims))
+	needsReconcile := false
+
 	for _, claim := range claims {
 		klog.InfoS("unpreparing claim", "claimUID", claim.UID)
+		if _, ok := d.prepared[claim.UID]; ok {
+			needsReconcile = true
+		}
 		delete(d.prepared, claim.UID)
 		results[claim.UID] = nil
 	}
+
+	// Save checkpoint (best-effort).
+	if needsReconcile {
+		if err := d.saveCheckpoint(); err != nil {
+			klog.ErrorS(err, "checkpoint save failed after unprepare")
+		}
+	}
+
+	if needsReconcile {
+		d.triggerReconcile()
+	}
+
 	return results, nil
 }
 
