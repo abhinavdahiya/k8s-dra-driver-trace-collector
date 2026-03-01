@@ -17,13 +17,20 @@ spec:
       serviceAccountName: trace-dra-driver
       priorityClassName: system-node-critical
       containers:
-      - name: collector
-        image: otel/opentelemetry-collector:latest
+      - name: alloy
+        image: grafana/alloy:latest
+        args:
+        - run
+        - /etc/alloy/config/
+        - --server.http.listen-addr=0.0.0.0:12345
         ports:
-        - containerPort: 4317
-          name: otlp-grpc
-        - containerPort: 4318
-          name: otlp-http
+        - containerPort: 12345
+          name: admin-http
+        volumeMounts:
+        - name: alloy-config
+          mountPath: /etc/alloy/config
+        - name: alloy-sockets
+          mountPath: /var/run/alloy
         resources:
           requests:
             cpu: 100m
@@ -41,15 +48,27 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: spec.nodeName
-        - name: DRIVER_NAME
-          value: "trace.example.com"
-        - name: TOTAL_SHARES
-          value: "1000"
+        - name: CONFIG_FILE
+          value: /etc/trace-dra-driver/config.yaml
         volumeMounts:
         - name: plugins-registry
           mountPath: /var/lib/kubelet/plugins_registry
         - name: plugins
           mountPath: /var/lib/kubelet/plugins
+        - name: driver-config
+          mountPath: /etc/trace-dra-driver
+          readOnly: true
+        - name: alloy-config
+          mountPath: /etc/alloy/config
+        - name: alloy-sockets
+          mountPath: /var/run/alloy
+        - name: cdi
+          mountPath: /var/run/cdi
+        - name: alloy-admin-config
+          mountPath: /admin-config
+          readOnly: true
+        - name: checkpoint
+          mountPath: /var/lib/trace-dra-driver
         resources:
           requests:
             cpu: 50m
@@ -66,3 +85,24 @@ spec:
         hostPath:
           path: /var/lib/kubelet/plugins
           type: DirectoryOrCreate
+      - name: driver-config
+        configMap:
+          name: trace-dra-driver-config
+      - name: alloy-config
+        emptyDir: {}
+      - name: alloy-sockets
+        hostPath:
+          path: /var/run/alloy
+          type: DirectoryOrCreate
+      - name: cdi
+        hostPath:
+          path: /var/run/cdi
+          type: DirectoryOrCreate
+      - name: checkpoint
+        hostPath:
+          path: /var/lib/trace-dra-driver
+          type: DirectoryOrCreate
+      - name: alloy-admin-config
+        configMap:
+          name: alloy-admin-config
+          optional: true

@@ -131,7 +131,7 @@ structures the allocation.
 | Pattern | How the user requests | Allocation results | Total shares consumed |
 |---|---|---|---|
 | **Explicit ResourceClaim** | `capacity.requests.shares: 50` | 1 result with `ConsumedCapacity: {shares: 50}` | 50 |
-| **Extended Resource** | `resources.requests: {trace.example.com: 50}` | 50 results, each with `ConsumedCapacity: {shares: 1}` (the default) | 50 |
+| **Extended Resource** | `resources.requests: {trace.example.com/capacity: 5}` | 5 results, each with `ConsumedCapacity: {shares: 10}` (`requestPolicy.default`) | 50 |
 
 The driver's Prepare/Unprepare code handles both patterns
 identically by iterating over all allocation results. No
@@ -585,9 +585,10 @@ spec:
         shares:
           value: "1000"
           requestPolicy:
-            default: "1"
+            default: "10"
             validRange:
-              min: "1"
+              min: "10"
+              step: "10"
 ```
 
 ### Unit tests
@@ -898,7 +899,7 @@ The implementation handles both allocation patterns transparently:
 | Pattern | Allocation results per claim |
 |---|---|
 | Explicit ResourceClaim (`capacity.requests.shares: 50`) | 1 result with `ConsumedCapacity: {shares: 50}` |
-| Extended Resource (`resources.requests: {trace.example.com/capacity: 10}`) | 10 results, each with `ConsumedCapacity: {shares: 1}` |
+| Extended Resource (`resources.requests: {trace.example.com/capacity: 10}`) | 10 results, each with `ConsumedCapacity: {shares: 10}` |
 
 ### Extended Resource Naming
 
@@ -1035,7 +1036,7 @@ For each claim in the batch:
 
    This works identically for both patterns:
    - Explicit claim: 1 result, `ConsumedCapacity: {shares: 50}`
-   - Extended resource: 10 results, each `ConsumedCapacity: {shares: 1}`
+   - Extended resource: 10 results, each `ConsumedCapacity: {shares: 10}`
 
 3. **Build device mappings.** For each `PreparedDevice`, create a
    `kubeletplugin.Device`:
@@ -1291,7 +1292,7 @@ kubectl --context kind-trace-dra-test -n trace-dra-test apply -f example/extende
 # 6. Verify auto-created claim
 kubectl --context kind-trace-dra-test -n trace-dra-test get resourceclaims
 # Should show an auto-generated claim for trace-consumer-extended
-# with 10 allocation results, each ConsumedCapacity: {shares: "1"}
+# with 5 allocation results, each ConsumedCapacity: {shares: "10"}
 
 # 7. Verify pod running
 kubectl --context kind-trace-dra-test -n trace-dra-test get pod trace-consumer-extended
@@ -1314,7 +1315,7 @@ kubectl --context kind-trace-dra-test -n trace-dra-test delete resourceclaim gre
 | Test | Setup | Assertion |
 |---|---|---|
 | `TestPrepare_ExplicitClaim` | Fake claim with 1 allocation result, `ConsumedCapacity: {shares: 50}` | Returns 1 `Device` entry, `PreparedClaim` has 1 device with `ConsumedCapacity=50`, `TotalShares()=50` |
-| `TestPrepare_ExtendedResource` | Fake claim with 50 allocation results, each `ConsumedCapacity: {shares: 1}` | Returns 50 `Device` entries, `PreparedClaim` has 50 devices, `TotalShares()=50` |
+| `TestPrepare_ExtendedResource` | Fake claim with 5 allocation results, each `ConsumedCapacity: {shares: 10}` | Returns 5 `Device` entries, `PreparedClaim` has 5 devices, `TotalShares()=50` |
 | `TestPrepare_Idempotent` | Call Prepare twice with same claim | Second call returns same result, map has 1 entry |
 | `TestPrepare_MultiClaim` | Batch of 3 claims | All 3 succeed, map has 3 entries |
 | `TestPrepare_NoAllocation` | Claim with nil `Status.Allocation` | Returns `PrepareResult{Err: ...}` |
@@ -1477,7 +1478,7 @@ restarts.
 
 For an explicit ResourceClaim, the `devices` array has 1 entry with
 a large `consumedCapacity`. For an extended resource claim, it has
-N entries each with `consumedCapacity: 1`.
+N entries each with `consumedCapacity: 10` (the `requestPolicy.default`).
 
 The `version` field allows future schema migrations.
 

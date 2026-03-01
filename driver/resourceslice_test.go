@@ -2,15 +2,59 @@ package driver
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/abhinavdahiya/k8s-dra-driver-trace-collector/driver/config"
 )
 
+func newTestDriverForSlice(t *testing.T, nodeName string, totalShares int) *Driver {
+	t.Helper()
+	cfg := &config.TraceDRADriverConfiguration{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: config.APIVersion,
+			Kind:       config.Kind,
+		},
+		Driver: config.DriverSpec{
+			Name:        "trace.example.com",
+			TotalShares: totalShares,
+			StepSize:    10,
+		},
+		Alloy: config.AlloySpec{
+			Address:            "http://127.0.0.1:12345",
+			ConfigDir:          t.TempDir(),
+			SocketDir:          "/var/run/alloy",
+			PipelineEntryPoint: "otelcol.exporter.otlp.default.input",
+		},
+		Scaling: config.ScalingSpec{
+			SpansPerUnit:      100,
+			MinSpansPerSecond: 100,
+			StreamsPerUnit:    10,
+			MaxRecvMsgSize:    "4MiB",
+		},
+		RateLimiting: config.RateLimitingSpec{
+			DecisionWait: metav1.Duration{Duration: 5 * time.Second},
+			NumTraces:    50000,
+		},
+		Reconciler: config.ReconcilerSpec{
+			Interval: metav1.Duration{Duration: 30 * time.Second},
+		},
+	}
+	return New(DriverOptions{
+		NodeName:   nodeName,
+		CDIDir:     t.TempDir(),
+		Config:     cfg,
+		CancelFunc: func() {},
+	})
+}
+
 func TestBuildResources_Default(t *testing.T) {
-	drv := New("node-1", "trace.example.com", 1000, func() {})
+	drv := newTestDriverForSlice(t, "node-1", 1000)
 	res := drv.BuildResources()
 
 	require.Len(t, res.Pools, 1)
@@ -22,7 +66,7 @@ func TestBuildResources_Default(t *testing.T) {
 }
 
 func TestBuildResources_AllowMultipleAllocations(t *testing.T) {
-	drv := New("node-1", "trace.example.com", 1000, func() {})
+	drv := newTestDriverForSlice(t, "node-1", 1000)
 	res := drv.BuildResources()
 
 	device := res.Pools["node-1"].Slices[0].Devices[0]
@@ -31,7 +75,7 @@ func TestBuildResources_AllowMultipleAllocations(t *testing.T) {
 }
 
 func TestBuildResources_Capacity(t *testing.T) {
-	drv := New("node-1", "trace.example.com", 1000, func() {})
+	drv := newTestDriverForSlice(t, "node-1", 1000)
 	res := drv.BuildResources()
 
 	device := res.Pools["node-1"].Slices[0].Devices[0]
@@ -43,7 +87,7 @@ func TestBuildResources_Capacity(t *testing.T) {
 }
 
 func TestBuildResources_RequestPolicy(t *testing.T) {
-	drv := New("node-1", "trace.example.com", 1000, func() {})
+	drv := newTestDriverForSlice(t, "node-1", 1000)
 	res := drv.BuildResources()
 
 	device := res.Pools["node-1"].Slices[0].Devices[0]
@@ -70,7 +114,7 @@ func TestBuildResources_RequestPolicy(t *testing.T) {
 }
 
 func TestBuildResources_CustomShares(t *testing.T) {
-	drv := New("node-1", "trace.example.com", 500, func() {})
+	drv := newTestDriverForSlice(t, "node-1", 500)
 	res := drv.BuildResources()
 
 	device := res.Pools["node-1"].Slices[0].Devices[0]
@@ -81,7 +125,7 @@ func TestBuildResources_CustomShares(t *testing.T) {
 }
 
 func TestBuildResources_Attribute(t *testing.T) {
-	drv := New("node-1", "trace.example.com", 1000, func() {})
+	drv := newTestDriverForSlice(t, "node-1", 1000)
 	res := drv.BuildResources()
 
 	device := res.Pools["node-1"].Slices[0].Devices[0]
@@ -92,7 +136,7 @@ func TestBuildResources_Attribute(t *testing.T) {
 }
 
 func TestBuildResources_PoolNameMatchesNode(t *testing.T) {
-	drv := New("worker-42", "trace.example.com", 1000, func() {})
+	drv := newTestDriverForSlice(t, "worker-42", 1000)
 	res := drv.BuildResources()
 
 	assert.Contains(t, res.Pools, "worker-42")
