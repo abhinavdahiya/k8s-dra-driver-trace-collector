@@ -15,8 +15,12 @@ const checkpointFileName = "checkpoint.json"
 
 // checkpointData is the on-disk format for the checkpoint file.
 // It stores the full prepared claims map so the driver can recover
-// state after a container or pod restart without waiting for kubelet
-// to re-call Prepare for each active claim.
+// state immediately on startup. When the driver re-registers with
+// kubelet (via the plugin socket), kubelet re-issues Prepare for
+// all active claims on the node — but those calls arrive
+// asynchronously. The checkpoint lets the reconciler restore Alloy
+// configs and socket directories before those re-Prepare calls
+// arrive, avoiding a window where running pods lose their listeners.
 type checkpointData struct {
 	// Claims is keyed by claim UID string (not types.UID) for JSON
 	// compatibility.
