@@ -101,8 +101,8 @@ graph LR
         CV --> A
     end
 
-    P1["Pod A<br/><i>TRACE_ENDPOINT=<br/>unix:///var/run/alloy/&lt;uidA&gt;.sock</i>"]
-    P2["Pod B<br/><i>TRACE_ENDPOINT=<br/>unix:///var/run/alloy/&lt;uidB&gt;.sock</i>"]
+    P1["Pod A<br/><i>TRACE_ENDPOINT=<br/>unix:///var/run/alloy/&lt;uidA&gt;/claim_&lt;uidA&gt;.sock</i>"]
+    P2["Pod B<br/><i>TRACE_ENDPOINT=<br/>unix:///var/run/alloy/&lt;uidB&gt;/claim_&lt;uidB&gt;.sock</i>"]
 
     CDI -.-> P1
     CDI -.-> P2
@@ -116,7 +116,7 @@ graph LR
 | Volume | Mount Path | Type | Used By | Purpose |
 |---|---|---|---|---|
 | `alloy-config` | `/etc/alloy/config/` | emptyDir | driver (rw), alloy (ro) | Final config directory: admin base + per-pod `claim-*.alloy` files |
-| `alloy-sockets` | `/var/run/alloy/` | emptyDir | driver (rw), alloy (rw), pods (ro) | Per-pod Unix domain sockets |
+| `alloy-sockets` | `/var/run/alloy/` | hostPath | driver (rw), alloy (rw), pods (ro) | Per-pod Unix domain sockets (per-claim subdirectories) |
 | `cdi-specs` | `/var/run/cdi/` | hostPath | driver (rw) | CDI device spec files |
 
 The `alloy-config` emptyDir is the single directory Alloy reads
@@ -240,7 +240,7 @@ Each per-pod `.alloy` file contains exactly two components:
 otelcol.receiver.otlp "<label>" {
   grpc {
     transport              = "unix"
-    endpoint               = "/var/run/alloy/<claimUID>.sock"
+    endpoint               = "/var/run/alloy/<claimUID>/claim_<claimUID>.sock"
     max_concurrent_streams = <scaled_streams>
     max_recv_msg_size      = "<scaled_msg_size>"
   }
@@ -740,20 +740,20 @@ injects the Unix domain socket path into the pod's containers.
 
 ```json
 {
-  "cdiVersion": "0.6.0",
+  "cdiVersion": "0.8.0",
   "kind": "trace.example.com/trace",
   "devices": [
     {
       "name": "<claimUID>",
       "containerEdits": {
         "env": [
-          "TRACE_ENDPOINT=unix:///var/run/alloy/<claimUID>.sock"
+          "TRACE_ENDPOINT=unix:///var/run/alloy/<claimUID>/claim_<claimUID>.sock"
         ],
         "mounts": [
           {
-            "hostPath": "/var/run/alloy/<claimUID>.sock",
-            "containerPath": "/var/run/alloy/<claimUID>.sock",
-            "type": "bind"
+            "hostPath": "/var/run/alloy/<claimUID>/",
+            "containerPath": "/var/run/alloy/<claimUID>/",
+            "options": ["bind"]
           }
         ]
       }
@@ -775,8 +775,8 @@ trace.example.com/trace=<claimUID>
 
 | Item | Value |
 |---|---|
-| Environment variable | `TRACE_ENDPOINT=unix:///var/run/alloy/<claimUID>.sock` |
-| Socket mount | `/var/run/alloy/<claimUID>.sock` (read-only bind mount) |
+| Environment variable | `TRACE_ENDPOINT=unix:///var/run/alloy/<claimUID>/claim_<claimUID>.sock` |
+| Socket directory mount | `/var/run/alloy/<claimUID>/` (bind mount of per-claim directory) |
 
 Application SDKs configure their OTLP exporter to send to the
 `TRACE_ENDPOINT` value. The socket is local to the node -- no
@@ -801,7 +801,7 @@ recording the claim, without waiting for Alloy to reload.
 The driver maintains 6 state stores with different durability
 characteristics:
 
-![State Stores](images/state-stores.png)
+![State Stores](images/state-stores.png) ([source](diagrams/state-stores.mmd))
 
 ```mermaid
 graph TB
@@ -817,11 +817,11 @@ graph TB
     subgraph hostpath["hostPath Volumes (survive pod restart)"]
         CP["checkpoint.json"]
         CDI["CDI specs<br/>/var/run/cdi/"]
+        SK["UDS socket dirs<br/>/var/run/alloy/"]
     end
 
     subgraph emptydir["emptyDir Volumes (survive container restart)"]
         CF[".alloy config files<br/>/etc/alloy/config/"]
-        SK["UDS sockets<br/>/var/run/alloy/"]
     end
 
     subgraph alloy["Alloy Process (ephemeral)"]
@@ -847,7 +847,7 @@ graph TB
 | `checkpoint.json` | hostPath | Yes | Yes | Yes |
 | `.alloy` config files | emptyDir | Yes | No | No |
 | CDI specs | hostPath | Yes | Yes | Yes |
-| UDS sockets | emptyDir | Yes | No | No |
+| UDS socket dirs | hostPath | Yes | Yes | No |
 | Alloy runtime | in-memory | No | No | No |
 
 **Key insight:** The checkpoint (hostPath) is the durable source of
@@ -861,7 +861,7 @@ Prepare and Unprepare are thin synchronous operations. The
 reconciler does the actual Alloy and filesystem work
 asynchronously.
 
-![Claim Lifecycle](images/claim-lifecycle.png)
+![Claim Lifecycle](images/claim-lifecycle.png) ([source](diagrams/claim-lifecycle.mmd))
 
 ```mermaid
 sequenceDiagram
@@ -879,7 +879,7 @@ sequenceDiagram
     K->>D: PrepareResourceClaims(claim)
     D->>D: Idempotency check (d.prepared)
     D->>D: Parse allocation → PreparedClaim
-    D->>D: Compute scaling params
+    D->>D: Compute socket path
     D->>CDI: Write CDI spec (idempotent)
     D->>D: d.prepared[uid] = pc
     D->>CP: Save checkpoint (best-effort)
@@ -921,12 +921,13 @@ PrepareResourceClaims(claim):
   ────  ───────────────────────────────  ──────  ──────────────────────────────
   1     Idempotency check (d.prepared)   No      Return cached PrepareResult
   2     Parse allocation results         Yes     Return Err in PrepareResult
-  3     Compute scaling params           No      Pure math, cannot fail
-  4     Write CDI spec (idempotent)      Yes     Return Err (disk full / perms)
-  5     d.prepared[uid] = pc             No      Map assignment
-  6     Save checkpoint (best-effort)    Yes     Log warning, continue (non-fatal)
-  7     Trigger reconciler               No      Channel send / goroutine
-  8     Return PrepareResult             No      —
+  3     Compute socket path              No      Pure math, cannot fail
+  4     Create socket directory          Yes     Return Err (disk full / perms)
+  5     Write CDI spec (idempotent)      Yes     Return Err (disk full / perms)
+  6     d.prepared[uid] = pc             No      Map assignment
+  7     Save checkpoint (best-effort)    Yes     Log warning, continue (non-fatal)
+  8     Trigger reconciler               No      Workqueue Add
+  9     Return PrepareResult             No      —
 ```
 
 **Why CDI is synchronous:** Kubelet reads the CDI spec immediately
@@ -949,7 +950,7 @@ UnprepareResourceClaims(claim):
   ────  ───────────────────────────────  ──────  ──────────────────────────────
   1     delete(d.prepared, uid)          No      Map delete (idempotent)
   2     Save checkpoint (best-effort)    Yes     Log warning, continue
-  3     Trigger reconciler               No      Channel send / goroutine
+  3     Trigger reconciler               No      Workqueue Add
   4     Return nil                       No      —
 ```
 
@@ -963,7 +964,7 @@ The reconciler is a single goroutine that converges actual
 filesystem and Alloy state toward the desired state expressed by
 `d.prepared`. It runs:
 
-- **On trigger** — after every Prepare / Unprepare (via channel)
+- **On trigger** — after every Prepare / Unprepare (via workqueue)
 - **On timer** — periodic safety net (e.g., every 30s)
 - **On startup** — once before accepting kubelet gRPC calls
 
@@ -971,14 +972,13 @@ Every step is idempotent. On any failure, the reconciler logs the
 error and returns — the next trigger or timer tick retries from the
 top.
 
-![Reconcile Loop](images/reconcile-loop.png)
+![Reconcile Loop](images/reconcile-loop.png) ([source](diagrams/reconcile-loop.mmd))
 
 ```mermaid
 flowchart TD
     Start(["Trigger: Prepare / Unprepare / Startup / Timer"])
-    Start --> Lock["Lock d.mu"]
-    Lock --> Desired["Build desired state<br/>from d.prepared"]
-    Desired --> Scan["Scan filesystem<br/>config files, CDI specs, sockets"]
+    Start --> Snapshot["Snapshot desired state<br/>(lock d.mu, copy d.prepared, unlock)"]
+    Snapshot --> Scan["Scan filesystem<br/>config files, CDI specs, socket dirs"]
     Scan --> Loop["For each claim in desired"]
 
     Loop --> CfgExists{"Config file<br/>exists?"}
@@ -990,8 +990,10 @@ flowchart TD
     CfgStale -- Yes --> ChkCDI
 
     ChkCDI{"CDI spec<br/>exists?"} -- No --> WriteCDI["Write CDI spec<br/>(idempotent)"]
-    WriteCDI --> NextClaim
-    ChkCDI -- Yes --> NextClaim["Next claim"]
+    WriteCDI --> ChkSockDir
+    ChkCDI -- Yes --> ChkSockDir
+
+    ChkSockDir["Ensure socket dir exists<br/>(MkdirAll)"] --> NextClaim["Next claim"]
     NextClaim --> Loop
 
     Loop -- "All claims done" --> Orphans["For each file on disk<br/>NOT in desired"]
@@ -1002,12 +1004,12 @@ flowchart TD
     OrphanCfg -- No --> OrphanCDI
 
     OrphanCDI{"Orphan<br/>CDI?"} -- Yes --> DelCDI["Delete CDI spec"]
-    DelCDI --> OrphanSock
-    OrphanCDI -- No --> OrphanSock
+    DelCDI --> OrphanSockDir
+    OrphanCDI -- No --> OrphanSockDir
 
-    OrphanSock{"Orphan<br/>socket?"} -- Yes --> DelSock["Delete socket"]
-    DelSock --> CheckDirty
-    OrphanSock -- No --> CheckDirty
+    OrphanSockDir{"Orphan<br/>socket dir?"} -- Yes --> DelSockDir["RemoveAll socket dir"]
+    DelSockDir --> CheckDirty
+    OrphanSockDir -- No --> CheckDirty
 
     CheckDirty{"dirty?"} -- Yes --> Reload["POST /-/reload<br/>(single reload)"]
     Reload --> ReloadOK{"200?"}
@@ -1068,10 +1070,10 @@ runs synchronously.
 |---|---|---|
 | **Driver container crash** | checkpoint, .alloy configs, CDI specs, sockets (all on volumes) | Load checkpoint → d.prepared. Reconcile verifies config files match. Alloy was unaffected (separate container), so runtime config is intact. Fast recovery. |
 | **Alloy container crash** | checkpoint, .alloy configs, CDI specs, sockets (all on volumes), d.prepared (driver still running) | Alloy restarts, re-reads all .alloy files from config dir. Self-healing, no driver action needed. Periodic reconciler verifies health. |
-| **Both containers crash** (pod restart) | checkpoint, CDI specs (hostPath only) | .alloy configs and sockets lost (emptyDir recreated). Load checkpoint → d.prepared. Reconcile re-generates all config files from checkpoint data. Single Alloy reload. Sockets created by Alloy on listen. |
-| **Node reboot** | checkpoint, CDI specs (hostPath) | Same as pod restart. Kubelet also restarts and re-calls Prepare for all active claims, so d.prepared is rebuilt from both checkpoint and kubelet calls. |
+| **Both containers crash** (pod restart) | checkpoint, CDI specs, socket dirs (hostPath) | .alloy configs lost (emptyDir recreated). Load checkpoint → d.prepared. Reconcile re-generates all config files from checkpoint data. Single Alloy reload. Sockets created by Alloy on listen. |
+| **Node reboot** | checkpoint, CDI specs, socket dirs (hostPath) | Same as pod restart. Kubelet also restarts and re-calls Prepare for all active claims, so d.prepared is rebuilt from both checkpoint and kubelet calls. |
 | **Checkpoint file deleted** | .alloy configs, CDI specs, sockets, Alloy runtime | Driver starts with empty d.prepared. Reconcile sees all config/CDI/socket files as orphans and deletes them. Kubelet re-calls Prepare for active claims, rebuilding everything from scratch. |
-| **Crash during Prepare (after step 5, before step 6)** | d.prepared has the claim, checkpoint may not | On restart, if checkpoint was saved: claim is in d.prepared, reconciler creates config. If checkpoint was not saved: claim is missing, kubelet re-calls Prepare. Either way, consistent. |
+| **Crash during Prepare (after step 6, before step 7)** | d.prepared has the claim, checkpoint may not | On restart, if checkpoint was saved: claim is in d.prepared, reconciler creates config. If checkpoint was not saved: claim is missing, kubelet re-calls Prepare. Either way, consistent. |
 | **Crash during Unprepare (after step 1, before reconcile)** | checkpoint has stale entry (claim removed from d.prepared but not yet cleaned up) | On restart, checkpoint loads stale claim into d.prepared. Reconciler re-creates config. Then kubelet re-calls Unprepare, removing it again. Brief re-creation is harmless — pod is being torn down. |
 
 #### Ghost entries
@@ -1148,7 +1150,7 @@ listener, reloads Alloy, and cleans up the CDI spec and socket.
 
 ---
 
-## 4.1 -- driver/alloy_config.go
+## 4.1 -- driver/alloy/config.go
 
 ### Responsibilities
 
@@ -1239,7 +1241,7 @@ Returns nil if the file does not exist (idempotent).
 
 ---
 
-## 4.2 -- driver/alloy_client.go
+## 4.2 -- driver/alloy/client.go
 
 ### Responsibilities
 
@@ -1247,37 +1249,27 @@ Returns nil if the file does not exist (idempotent).
 2. Check Alloy health.
 3. Handle reload errors.
 
-### AlloyClient
+### Client
 
 ```go
-// AlloyClient communicates with the Alloy admin HTTP API.
-type AlloyClient struct {
+// Client communicates with the Alloy admin HTTP API.
+type Client struct {
     baseURL    string // e.g. "http://127.0.0.1:12345"
     httpClient *http.Client
 }
 
-func NewAlloyClient(baseURL string) *AlloyClient
+func NewClient(baseURL string) *Client
 ```
 
 ### Reload
 
 ```go
-func (c *AlloyClient) Reload(ctx context.Context) error
+func (c *Client) Reload(ctx context.Context) error
 ```
 
 Sends `POST <baseURL>/-/reload`. Returns nil on HTTP 200.
 Returns a descriptive error on HTTP 400 (includes response body).
 Returns an error on connection failure.
-
-### Healthy
-
-```go
-func (c *AlloyClient) Healthy(ctx context.Context) error
-```
-
-Sends `GET <baseURL>/-/healthy`. Returns nil on HTTP 200.
-Returns an error on HTTP 500 (includes unhealthy component names
-from response body).
 
 ### Unit Tests
 
@@ -1288,12 +1280,10 @@ Use `httptest.NewServer` to mock the Alloy admin API:
 | `TestReload_Success` | HTTP 200 -> nil error |
 | `TestReload_BadConfig` | HTTP 400 -> error with body |
 | `TestReload_ConnectionRefused` | Connection error -> descriptive error |
-| `TestHealthy_AllHealthy` | HTTP 200 -> nil |
-| `TestHealthy_Unhealthy` | HTTP 500 -> error with component names |
 
 ---
 
-## 4.3 -- driver/cdi.go
+## 4.3 -- driver/cdi/cdi.go
 
 ### Responsibilities
 
@@ -1301,24 +1291,24 @@ Use `httptest.NewServer` to mock the Alloy admin API:
 2. Write CDI spec file to disk.
 3. Delete CDI spec file.
 
-### WriteCDISpec / DeleteCDISpec
+### WriteSpec / DeleteSpec
 
 ```go
-func WriteCDISpec(cdiDir string, claimUID string, socketPath string) error
-func DeleteCDISpec(cdiDir string, claimUID string) error
+func WriteSpec(cdiDir string, claimUID string, socketPath string) error
+func DeleteSpec(cdiDir string, claimUID string) error
 ```
 
-`WriteCDISpec` generates the CDI JSON (see
+`WriteSpec` generates the CDI JSON (see
 [CDI Spec Content](#cdi-spec-content)) and writes to
 `<cdiDir>/trace-<claimUID>.json`.
 
-`DeleteCDISpec` removes the file. Returns nil if the file does
+`DeleteSpec` removes the file. Returns nil if the file does
 not exist.
 
-### CDIDeviceID
+### DeviceID
 
 ```go
-func CDIDeviceID(claimUID string) string
+func DeviceID(claimUID string) string
 ```
 
 Returns `trace.example.com/trace=<claimUID>`.
@@ -1327,9 +1317,9 @@ Returns `trace.example.com/trace=<claimUID>`.
 
 | Test | Validates |
 |---|---|
-| `TestWriteCDISpec_ValidJSON` | Output is valid JSON with correct structure |
-| `TestWriteCDISpec_SocketPath` | Socket path matches claim UID |
-| `TestCDIDeviceID_Format` | Returns correct `vendor/class=name` format |
+| `TestWriteSpec_ValidJSON` | Output is valid JSON with correct structure |
+| `TestWriteSpec_SocketPath` | Socket path matches claim UID |
+| `TestDeviceID_Format` | Returns correct `vendor/class=name` format |
 
 ---
 
@@ -1350,50 +1340,51 @@ For each claim in the batch:
 2. **Existing logic** (spec 000): collect allocation results,
    build `PreparedClaim` (in a local variable, not yet stored).
 
-3. **Compute scaled parameters:**
+3. **Compute socket path:**
    ```go
-   params := ComputeParams(
-       claimUID,
-       pc.TotalShares(),
-       d.cfg,
-   )
+   socketPath := alloy.SocketPath(d.cfg.Alloy.SocketDir, claimUID)
    ```
 
 4. **Write CDI spec** (synchronous — kubelet needs it immediately):
    ```go
-   err = WriteCDISpec(d.cdiDir, claimUID, params.SocketPath)
+   err = cdi.WriteSpec(d.cdiDir, claimUID, socketPath)
    if err != nil { return err }
    ```
 
-5. **Record listener state:**
+5. **Create socket directory** (synchronous — CDI bind mount needs it):
+   ```go
+   socketDir := filepath.Dir(socketPath)
+   if err := os.MkdirAll(socketDir, 0755); err != nil { return err }
+   ```
+
+6. **Record listener state:**
    ```go
    pc.Listener = &ListenerState{
-       SocketPath:     params.SocketPath,
-       ConfigFile:     configFileName(claimUID),
-       SpansPerSecond: params.SpansPerSecond,
+       SocketPath: socketPath,
+       ConfigFile: alloy.ConfigFileName(claimUID),
    }
    ```
 
-6. **Store in `d.prepared`:**
+7. **Store in `d.prepared`:**
    ```go
    d.prepared[claimUID] = pc
    ```
 
-7. **Save checkpoint** (best-effort):
+8. **Save checkpoint** (best-effort):
    ```go
    if err := d.saveCheckpoint(); err != nil {
        klog.ErrorS(err, "checkpoint save failed", "claimUID", claimUID)
    }
    ```
 
-8. **Trigger reconciler** (async, non-blocking):
+9. **Trigger reconciler** (async, non-blocking):
    ```go
    d.triggerReconcile()
    ```
 
-9. **Build PrepareResult** with CDI device IDs:
+10. **Build PrepareResult** with CDI device IDs:
    ```go
-   result.CDIDeviceIDs = []string{CDIDeviceID(claimUID)}
+   result.CDIDeviceIDs = []string{cdi.DeviceID(claimUID)}
    ```
 
 **Why CDI is synchronous, Alloy is async:** Kubelet reads CDI
@@ -1404,8 +1395,8 @@ slightly later — the pod's SDK retries connections with backoff
 until the socket is ready (typically < 1s after reconcile).
 
 **No rollback logic:** If CDI write fails, nothing was stored in
-`d.prepared` yet (step 6 hasn't executed), so the state is clean.
-Kubelet retries Prepare. If checkpoint save fails (step 7), the
+`d.prepared` yet (step 7 hasn't executed), so the state is clean.
+Kubelet retries Prepare. If checkpoint save fails (step 8), the
 claim is in memory and will be checkpointed on the next
 Prepare/Unprepare. The reconciler creates the config file
 independently.
@@ -1430,7 +1421,6 @@ type PreparedDevice struct {
 type ListenerState struct {
     SocketPath     string `json:"socketPath"`
     ConfigFile     string `json:"configFile"`
-    SpansPerSecond int    `json:"spansPerSecond"`
 }
 ```
 
@@ -1553,7 +1543,7 @@ EOF
 # Check pod has TRACE_ENDPOINT
 kubectl --context kind-trace-dra-test -n trace-dra-test \
   exec trace-consumer -- env | grep TRACE_ENDPOINT
-# TRACE_ENDPOINT=unix:///var/run/alloy/<claimUID>.sock
+# TRACE_ENDPOINT=unix:///var/run/alloy/<claimUID>/claim_<claimUID>.sock
 
 # Check Alloy loaded the config
 kubectl --context kind-trace-dra-test -n trace-dra-test \
@@ -1586,15 +1576,16 @@ kubectl --context kind-trace-dra-test -n trace-dra-test \
 
 | File | Contents |
 |---|---|
-| `driver/config.go` | `TraceDRADriverConfiguration` types, loading, defaulting, validation |
-| `driver/config_test.go` | Unit tests for config loading, defaulting, validation |
-| `driver/alloy_config.go` | Config template rendering, scaling formula, file write/delete |
-| `driver/alloy_config_test.go` | Unit tests for template, scaling, file operations |
-| `driver/alloy_client.go` | HTTP client for Alloy admin API (reload, health) |
-| `driver/alloy_client_test.go` | Unit tests with httptest mock server |
-| `driver/cdi.go` | CDI spec generation, write/delete |
-| `driver/cdi_test.go` | Unit tests for CDI spec format |
-| `driver/driver.go` | Extended Prepare/Unprepare (sync: CDI + checkpoint; async: trigger reconciler) |
+| `driver/config/config.go` | `TraceDRADriverConfiguration` types, loading, defaulting, validation |
+| `driver/config/config_test.go` | Unit tests for config loading, defaulting, validation |
+| `driver/alloy/config.go` | Config template rendering, scaling formula, file write/delete |
+| `driver/alloy/config_test.go` | Unit tests for template, scaling, file operations |
+| `driver/alloy/client.go` | HTTP client for Alloy admin API (reload) |
+| `driver/alloy/client_test.go` | Unit tests with httptest mock server |
+| `driver/cdi/cdi.go` | CDI spec generation, write/delete |
+| `driver/cdi/cdi_test.go` | Unit tests for CDI spec format |
+| `driver/driver.go` | Extended Prepare/Unprepare (sync: CDI + socket dir + checkpoint; async: trigger reconciler) |
+| `internal/atomicfile/atomicfile.go` | Shared atomic write helper |
 | `deploy/daemonset.yaml` | Updated with shared volumes, Alloy container, driver config ConfigMap |
 | `deploy/driver-config.yaml` | Example `TraceDRADriverConfiguration` ConfigMap |
 | `deploy/alloy-base.alloy` | Example admin config (pipeline + exporters) |
@@ -1670,34 +1661,34 @@ Driver State Machine section for the full flowchart.
 ### Algorithm
 
 ```
-1. Lock d.mu
-2. Build desired state from d.prepared (claim UIDs + ListenerState)
-3. Unlock d.mu
+1. Snapshot desired state: lock d.mu, copy d.prepared, unlock d.mu
 
-4. Scan filesystem:
+2. Scan filesystem:
    - glob <configDir>/claim-*.alloy  -> extract claim UIDs
    - glob <cdiDir>/trace-*.json      -> extract claim UIDs
-   - glob <socketDir>/*.sock          -> extract claim UIDs
+   - ReadDir <socketDir>               -> extract claim UIDs from subdirectory names
 
-5. For each claim in desired state:
+3. For each claim in desired state:
 
-   | Config file | CDI spec | Action |
-   |---|---|---|
-   | missing | — | render + write config, dirty=true |
-   | exists, stale | — | overwrite config, dirty=true |
-   | exists, current | — | no-op |
-   | — | missing | write CDI spec |
-   | — | exists | no-op |
+   | Config file | CDI spec | Socket dir | Action |
+   |---|---|---|---|
+   | missing | — | — | render + write config, dirty=true |
+   | exists, stale | — | — | overwrite config, dirty=true |
+   | exists, current | — | — | no-op |
+   | — | missing | — | write CDI spec |
+   | — | exists | — | no-op |
+   | — | — | missing | MkdirAll |
+   | — | — | exists | no-op |
 
-6. For each file on disk NOT in desired state:
+4. For each file on disk NOT in desired state:
 
    | File type | Action |
    |---|---|
    | orphan config | delete, dirty=true |
    | orphan CDI | delete |
-   | orphan socket | delete (ignore ErrNotExist) |
+   | orphan socket dir | RemoveAll (ignore ErrNotExist) |
 
-7. If dirty:
+5. If dirty:
    POST /-/reload (single reload)
    If reload fails: log error, return (retry next cycle)
 ```
@@ -1708,28 +1699,22 @@ Driver State Machine section for the full flowchart.
 func (d *Driver) StartReconciler(ctx context.Context)
 ```
 
-Starts a goroutine that:
+Starts three goroutines:
 
-1. Selects on three channels:
-   - `d.reconcileCh` (buffered, size 1) — trigger from
-     Prepare/Unprepare
-   - `ticker.C` — periodic safety net
-   - `ctx.Done()` — shutdown
+1. **Periodic ticker** — enqueues the reconcile key on each tick.
+2. **Worker** — calls `d.queue.Get()` (blocking), runs
+   `d.Reconcile(ctx)`, calls `d.queue.Done(key)`.
+3. **Shutdown** — waits on `ctx.Done()`, then calls
+   `d.queue.ShutDown()`.
 
-2. On each trigger, calls `d.Reconcile(ctx)`.
-
-3. Coalesces rapid triggers: the buffered channel (size 1)
-   naturally drops duplicate sends. If Prepare is called 10
-   times in quick succession, the reconciler runs once and
-   converges all 10 claims.
+The workqueue (`k8s.io/client-go/util/workqueue`) naturally
+deduplicates: if multiple Prepare/Unprepare calls trigger
+`d.queue.Add(reconcileKey)` before the worker picks it up,
+only one reconcile runs and converges all changes.
 
 ```go
 func (d *Driver) triggerReconcile() {
-    select {
-    case d.reconcileCh <- struct{}{}:
-    default:
-        // Already triggered, next cycle will pick up changes
-    }
+    d.queue.Add(reconcileKey)
 }
 ```
 
