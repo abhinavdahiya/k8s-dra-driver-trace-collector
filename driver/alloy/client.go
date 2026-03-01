@@ -47,27 +47,3 @@ func (c *Client) Reload(ctx context.Context) error {
 	body, _ := io.ReadAll(resp.Body)
 	return fmt.Errorf("reload failed (HTTP %d): %s", resp.StatusCode, string(body))
 }
-
-// Healthy checks whether the Alloy instance reports healthy.
-// Returns nil on HTTP 200. Returns an error on non-200 status
-// (includes response body).
-func (c *Client) Healthy(ctx context.Context) error {
-	url := c.baseURL + "/-/healthy"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return fmt.Errorf("creating healthy request: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("healthy request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusOK {
-		return nil
-	}
-
-	body, _ := io.ReadAll(resp.Body)
-	return fmt.Errorf("alloy unhealthy (HTTP %d): %s", resp.StatusCode, string(body))
-}
