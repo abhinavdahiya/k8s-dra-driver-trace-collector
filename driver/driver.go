@@ -44,7 +44,6 @@ type Driver struct {
 	checkpointPath string
 	cancelFunc     context.CancelFunc
 
-	// Listener management (M4).
 	cdiDir             string
 	scalingConfig      alloy.ScalingConfig
 	socketDir          string
@@ -52,7 +51,7 @@ type Driver struct {
 	adminConfigDir     string // if set, sync admin *.alloy files into configDir
 	pipelineEntryPoint string
 
-	// Reconciler (M5): client-go workqueue for trigger-based reconciliation.
+	// Workqueue for trigger-based reconciliation.
 	// Prepare/Unprepare enqueue reconcileKey; the workqueue deduplicates.
 	queue    workqueue.TypedInterface[string]
 	reloader AlloyReloader
@@ -73,7 +72,6 @@ type PreparedClaim struct {
 	Name      string
 	Devices   []PreparedDevice
 
-	// Listener state (M4). Nil when listener management is disabled.
 	Listener *ListenerState `json:"listener,omitempty"`
 }
 
