@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: trace-consumer-extended
+spec:
+  containers:
+  - name: app
+    image: busybox:latest
+    command: ["sh", "-c", "echo 'I have 50 trace shares (5 units x 10 shares/unit)' && sleep 3600"]
+    resources:
+      requests:
+        trace.example.com/capacity: 5
+      limits:
+        trace.example.com/capacity: 5
+  restartPolicy: Never

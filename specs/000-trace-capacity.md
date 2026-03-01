@@ -110,9 +110,10 @@ Device "trace-capacity"
     shares:
       value: 1000
       requestPolicy:
-        default: 1       (claim that omits shares gets 1)
+        default: 10      (claim that omits shares gets 10 = 1 ext-resource unit)
         validRange:
-          min: 1          (at least 1 share per claim)
+          min: 10         (at least 10 shares per claim)
+          step: 10        (requests rounded up to multiples of 10)
 ```
 
 Multiple ResourceClaims can allocate from the same device
@@ -178,7 +179,7 @@ spec:
   selectors:
   - cel:
       expression: "device.driver == 'trace.example.com'"
-  extendedResourceName: trace.example.com
+  extendedResourceName: trace.example.com/capacity
 ```
 
 Pods then request trace capacity like any other resource:
@@ -194,13 +195,15 @@ spec:
     image: myapp:latest
     resources:
       requests:
-        trace.example.com: 50
+        trace.example.com/capacity: "5"
+      limits:
+        trace.example.com/capacity: "5"
 ```
 
 Behind the scenes, the scheduler auto-creates a "special"
-ResourceClaim with `count: 50`. Because the device's
-`requestPolicy.default` is 1, each of the 50 allocations consumes
-1 share, for a total of 50. The driver sees the same
+ResourceClaim with `count: 5`. Because the device's
+`requestPolicy.default` is 10, each of the 5 allocations consumes
+10 shares (= 1 extended-resource unit), for a total of 50 shares. The driver sees the same
 Prepare/Unprepare gRPC calls regardless of which pattern was used.
 
 **No driver-side changes are needed** to support extended resources.
@@ -510,9 +513,10 @@ device := resourceapi.Device{
             "shares": {
                 Value: resource.MustParse(strconv.Itoa(d.totalShares)),
                 RequestPolicy: &resourceapi.CapacityRequestPolicy{
-                    Default: ptr.To(resource.MustParse("1")),
+                    Default: ptr.To(resource.MustParse("10")),
                     ValidRange: &resourceapi.CapacityRequestPolicyRange{
-                        Min: ptr.To(resource.MustParse("1")),
+                        Min:  ptr.To(resource.MustParse("10")),
+                        Step: ptr.To(resource.MustParse("10")),
                     },
                 },
             },
@@ -522,11 +526,12 @@ device := resourceapi.Device{
 ```
 
 The `RequestPolicy` defines:
-- **Default: 1** -- a claim that omits `capacity.requests.shares`
-  gets 1 share.
-- **ValidRange.Min: 1** -- every claim must consume at least 1 share.
+- **Default: 10** -- a claim that omits `capacity.requests.shares`
+  gets 10 shares (= 1 extended-resource unit).
+- **ValidRange.Min: 10** -- every claim must consume at least 10 shares.
+- **ValidRange.Step: 10** -- requests are rounded up to multiples of 10.
+  This keeps explicit claims aligned with extended-resource units.
 - **No Max** -- a single claim could theoretically consume all 1000.
-- **No Step** -- any integer from 1 to remaining capacity is valid.
 
 #### No slicing needed
 
@@ -594,7 +599,7 @@ spec:
 | `TestBuildResources_Default` | 1 device named `trace-capacity`, 1 slice, 1 pool |
 | `TestBuildResources_AllowMultipleAllocations` | Device has `AllowMultipleAllocations == true` |
 | `TestBuildResources_Capacity` | `capacity["shares"].Value` equals total shares (1000) |
-| `TestBuildResources_RequestPolicy` | Default is 1, ValidRange.Min is 1 |
+| `TestBuildResources_RequestPolicy` | Default is 10, ValidRange.Min is 10, ValidRange.Step is 10 |
 | `TestBuildResources_CustomShares` | `totalShares=500` -> capacity value is 500 |
 
 ---
@@ -893,7 +898,29 @@ The implementation handles both allocation patterns transparently:
 | Pattern | Allocation results per claim |
 |---|---|
 | Explicit ResourceClaim (`capacity.requests.shares: 50`) | 1 result with `ConsumedCapacity: {shares: 50}` |
-| Extended Resource (`resources.requests: {trace.example.com: 50}`) | 50 results, each with `ConsumedCapacity: {shares: 1}` |
+| Extended Resource (`resources.requests: {trace.example.com/capacity: 10}`) | 10 results, each with `ConsumedCapacity: {shares: 1}` |
+
+### Extended Resource Naming
+
+The extended resource name used in `resources.requests` is **not**
+the driver name. It is the value of `DeviceClass.spec.extendedResourceName`,
+which our DeviceClass sets to `trace.example.com/capacity`. This
+follows the standard Kubernetes extended resource format
+(`<domain>/<resource>`). Both `requests` and `limits` must be set
+to the same value.
+
+### Allocation Results Limit
+
+The Kubernetes API enforces a hard maximum of 32 entries in a
+claim's `status.allocation.devices.results` array
+(`AllocationResultsMaxSize = 32` in `k8s.io/api/resource/v1`).
+The extended resource pattern maps each requested unit to a
+separate allocation result, so requesting more than 32 units via
+extended resources causes a scheduling failure. The explicit
+ResourceClaim pattern is unaffected -- it uses a single result
+with `ConsumedCapacity: {shares: N}` regardless of N. For this
+reason the extended resource example uses 10 shares (well within
+the limit), while the explicit claim example uses 50.
 
 ## Acceptance Criteria
 
@@ -948,7 +975,7 @@ type PreparedClaim struct {
 // scheduler. For explicit ResourceClaims with consumable capacity,
 // there is typically 1 device with a large ConsumedCapacity. For
 // extended resource claims, there are N devices each consuming the
-// default (1 share).
+// default (10 shares per unit).
 type PreparedDevice struct {
     Request          string // original request name
     Pool             string // pool name (= node name)
@@ -1008,7 +1035,7 @@ For each claim in the batch:
 
    This works identically for both patterns:
    - Explicit claim: 1 result, `ConsumedCapacity: {shares: 50}`
-   - Extended resource: 50 results, each `ConsumedCapacity: {shares: 1}`
+   - Extended resource: 10 results, each `ConsumedCapacity: {shares: 1}`
 
 3. **Build device mappings.** For each `PreparedDevice`, create a
    `kubeletplugin.Device`:
@@ -1144,8 +1171,17 @@ spec:
 `example/extended-resource.yaml`
 
 This pattern uses the traditional `resources.requests` syntax. The
-scheduler auto-creates a ResourceClaim with `count: 50`, producing
-50 allocation results each consuming 1 share.
+resource name must match the DeviceClass's `extendedResourceName`
+field (`trace.example.com/capacity`), and both `requests` and
+`limits` must be set to the same value.
+
+The scheduler auto-creates a ResourceClaim with `count: 5`,
+producing 5 allocation results each consuming 10 shares (the
+`requestPolicy.default`). This stays well within the Kubernetes API
+limit of 32 entries per claim (`AllocationResultsMaxSize`). The
+maximum via extended resources is 32 units x 10 shares = 320 shares.
+For larger allocations, use the explicit ResourceClaim pattern
+(section 2.5) which consumes capacity in a single result.
 
 ```yaml
 apiVersion: v1
@@ -1156,10 +1192,12 @@ spec:
   containers:
   - name: app
     image: busybox:latest
-    command: ["sh", "-c", "echo 'I have 50 trace shares (extended resource)' && sleep 3600"]
+    command: ["sh", "-c", "echo 'I have 10 trace shares (extended resource)' && sleep 3600"]
     resources:
       requests:
-        trace.example.com: 50
+        trace.example.com/capacity: 10
+      limits:
+        trace.example.com/capacity: 10
   restartPolicy: Never
 ```
 
@@ -1170,12 +1208,28 @@ automatically.
 
 ## 2.7 -- Over-allocation Test
 
-This test verifies capacity enforcement works with either pattern.
+This test verifies capacity enforcement. It uses the explicit
+ResourceClaim pattern so the over-allocation value is not
+constrained by the 32-result limit.
 
 ```bash
-# With 50 shares already consumed (from example 1 or 2), try to
-# claim 960 more shares:
+# With 10 shares already consumed (from example 2), try to
+# claim 995 more shares using an explicit ResourceClaim:
 kubectl --context kind-trace-dra-test -n trace-dra-test apply -f - <<'EOF'
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: greedy-claim
+spec:
+  devices:
+    requests:
+    - name: trace-shares
+      exactly:
+        deviceClassName: trace.example.com
+        capacity:
+          requests:
+            shares: 995
+---
 apiVersion: v1
 kind: Pod
 metadata:
@@ -1186,21 +1240,23 @@ spec:
     image: busybox:latest
     command: ["sleep", "3600"]
     resources:
-      requests:
-        trace.example.com: 960
+      claims:
+      - name: trace-claim
+  resourceClaims:
+  - name: trace-claim
+    resourceClaimName: greedy-claim
   restartPolicy: Never
 EOF
 
-# greedy-pod should stay Pending -- scheduler cannot find 960
-# available shares when 50 are already consumed (only 950 remain).
+# greedy-pod should stay Pending -- scheduler cannot find 995
+# available shares when 10 are already consumed (only 990 remain).
 kubectl --context kind-trace-dra-test -n trace-dra-test get pod greedy-pod
 # STATUS: Pending
 
 # Free shares by deleting the first consumer
-kubectl --context kind-trace-dra-test -n trace-dra-test delete pod trace-consumer-explicit  # or trace-consumer-extended
-kubectl --context kind-trace-dra-test -n trace-dra-test delete resourceclaim my-traces      # only if using explicit claim
+kubectl --context kind-trace-dra-test -n trace-dra-test delete pod trace-consumer-extended
 
-# greedy-pod should now schedule (960 <= 1000)
+# greedy-pod should now schedule (995 <= 1000)
 kubectl --context kind-trace-dra-test -n trace-dra-test get pod greedy-pod
 # STATUS: Running
 ```
@@ -1235,6 +1291,7 @@ kubectl --context kind-trace-dra-test -n trace-dra-test apply -f example/extende
 # 6. Verify auto-created claim
 kubectl --context kind-trace-dra-test -n trace-dra-test get resourceclaims
 # Should show an auto-generated claim for trace-consumer-extended
+# with 10 allocation results, each ConsumedCapacity: {shares: "1"}
 
 # 7. Verify pod running
 kubectl --context kind-trace-dra-test -n trace-dra-test get pod trace-consumer-extended
@@ -1245,6 +1302,7 @@ kubectl --context kind-trace-dra-test -n trace-dra-test get pod trace-consumer-e
 # 9. Clean up
 kubectl --context kind-trace-dra-test -n trace-dra-test delete pod trace-consumer-extended
 kubectl --context kind-trace-dra-test -n trace-dra-test delete pod greedy-pod
+kubectl --context kind-trace-dra-test -n trace-dra-test delete resourceclaim greedy-claim
 ```
 
 ---
@@ -1304,7 +1362,7 @@ func fakeExplicitClaim(uid, name, ns string, shares int64) *resourceapi.Resource
 }
 ```
 
-**Extended resource pattern (N results, 1 share each):**
+**Extended resource pattern (N results, 10 shares each):**
 
 ```go
 func fakeExtendedResourceClaim(uid, name, ns string, count int) *resourceapi.ResourceClaim {
@@ -1317,7 +1375,7 @@ func fakeExtendedResourceClaim(uid, name, ns string, count int) *resourceapi.Res
             Device:           "trace-capacity",
             ShareID:          ptr.To(types.UID(fmt.Sprintf("share-%04d", i))),
             ConsumedCapacity: map[resourceapi.QualifiedName]resource.Quantity{
-                "shares": resource.MustParse("1"),
+                "shares": resource.MustParse("10"),
             },
         }
     }
@@ -1371,7 +1429,7 @@ idempotent across process boundaries.
       start).
 - [ ] Writes are atomic (write-to-temp, then rename).
 - [ ] Checkpoint correctly round-trips both explicit claim (1 device,
-      N shares) and extended resource (N devices, 1 share each)
+      N shares) and extended resource (N devices, 10 shares each)
       allocation patterns.
 - [ ] Unit tests pass: `go test ./...`.
 - [ ] kind test: prepare a claim, kill the driver pod, verify
@@ -1635,7 +1693,7 @@ kubectl --context kind-trace-dra-test -n trace-dra-test exec -c driver \
 | Test | Description |
 |---|---|
 | `TestSaveAndLoad_ExplicitClaim` | Save a checkpoint with 1 claim having 1 device (50 shares), load it back, verify equality |
-| `TestSaveAndLoad_ExtendedResource` | Save a checkpoint with 1 claim having 50 devices (1 share each), load it back, verify equality |
+| `TestSaveAndLoad_ExtendedResource` | Save a checkpoint with 1 claim having 5 devices (10 shares each), load it back, verify equality |
 | `TestSaveAndLoad_Mixed` | Save 3 claims (mix of explicit and extended resource patterns), load back, verify |
 | `TestLoadMissing` | Load from non-existent path, get empty checkpoint |
 | `TestLoadCorrupted` | Write garbage bytes, load returns empty checkpoint |

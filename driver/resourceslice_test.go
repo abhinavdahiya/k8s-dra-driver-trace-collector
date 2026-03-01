@@ -52,16 +52,21 @@ func TestBuildResources_RequestPolicy(t *testing.T) {
 	require.NotNil(t, sharesCap.RequestPolicy)
 	require.NotNil(t, sharesCap.RequestPolicy.Default)
 
-	expectedDefault := resource.MustParse("1")
+	expectedDefault := resource.MustParse("10")
 	assert.True(t, sharesCap.RequestPolicy.Default.Equal(expectedDefault),
 		"expected default %s, got %s", expectedDefault.String(), sharesCap.RequestPolicy.Default.String())
 
 	require.NotNil(t, sharesCap.RequestPolicy.ValidRange)
 	require.NotNil(t, sharesCap.RequestPolicy.ValidRange.Min)
 
-	expectedMin := resource.MustParse("1")
+	expectedMin := resource.MustParse("10")
 	assert.True(t, sharesCap.RequestPolicy.ValidRange.Min.Equal(expectedMin),
 		"expected min %s, got %s", expectedMin.String(), sharesCap.RequestPolicy.ValidRange.Min.String())
+
+	require.NotNil(t, sharesCap.RequestPolicy.ValidRange.Step)
+	expectedStep := resource.MustParse("10")
+	assert.True(t, sharesCap.RequestPolicy.ValidRange.Step.Equal(expectedStep),
+		"expected step %s, got %s", expectedStep.String(), sharesCap.RequestPolicy.ValidRange.Step.String())
 }
 
 func TestBuildResources_CustomShares(t *testing.T) {
