@@ -1,0 +1,30 @@
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: greedy-traces
+spec:
+  devices:
+    requests:
+    - name: trace-shares
+      exactly:
+        deviceClassName: trace.example.com
+        capacity:
+          requests:
+            shares: 960
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: greedy-pod
+spec:
+  containers:
+  - name: app
+    image: busybox:latest
+    command: ["sh", "-c", "echo 'I have 960 trace shares (greedy claim)' && sleep 3600"]
+    resources:
+      claims:
+      - name: trace-claim
+  resourceClaims:
+  - name: trace-claim
+    resourceClaimName: greedy-traces
+  restartPolicy: Never
