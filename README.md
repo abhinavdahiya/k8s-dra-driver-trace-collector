@@ -14,7 +14,7 @@ Just like a GPU DRA driver publishes `nvidia.com/gpu` devices, this driver publi
 
 The DRA driver publishes a `ResourceSlice` with 1000 consumable shares per node — just like how GPU drivers publish devices.
 
-[![asciicast](https://asciinema.org/a/hpS7aGEomUOp2OVD.svg)](https://asciinema.org/a/hpS7aGEomUOp2OVD)
+[![Demo 1](demo/01-resource-slice.gif)](https://asciinema.org/a/hpS7aGEomUOp2OVD)
 
 <details>
 <summary>Commands</summary>
@@ -31,7 +31,7 @@ kubectl get resourceslices -o yaml | head -40                        # capacity.
 
 A pod requests trace capacity with `resources.requests: { trace.example.com/capacity: "5" }` — no ResourceClaim YAML. The scheduler auto-creates a ResourceClaim, and the pod gets `TRACE_ENDPOINT` injected via [CDI](https://github.com/cncf-tags/container-device-interface). As simple as `nvidia.com/gpu: 1`.
 
-[![asciicast](https://asciinema.org/a/BaDcfQpahr5OjPY1.svg)](https://asciinema.org/a/BaDcfQpahr5OjPY1)
+[![Demo 2](demo/02-extended-resource.gif)](https://asciinema.org/a/BaDcfQpahr5OjPY1)
 
 <details>
 <summary>Commands</summary>
@@ -49,7 +49,7 @@ kubectl -n trace-dra-test exec trace-consumer-extended -- env | grep TRACE_ENDPO
 
 A greedy pod requesting 960 shares stays Pending when only 950 remain. After freeing shares, it immediately schedules. Same UX as requesting an unavailable GPU.
 
-[![asciicast](https://asciinema.org/a/tuSuY374MBFRLtjQ.svg)](https://asciinema.org/a/tuSuY374MBFRLtjQ)
+[![Demo 3](demo/03-scheduler-enforcement.gif)](https://asciinema.org/a/tuSuY374MBFRLtjQ)
 
 <details>
 <summary>Commands</summary>
